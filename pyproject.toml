@@ -5,12 +5,27 @@ build-backend = "hatchling.build"
 [project]
 name = "sbl-debugger"
 version = "0.1.0"
-description = "Embedded debug MCP server for Claude Code — GDB/MI + OpenOCD"
+description = "Embedded debug MCP server — GDB/MI + OpenOCD for ARM Cortex-M"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Sound Byte Labs" }]
+keywords = ["mcp", "debugger", "embedded", "gdb", "openocd", "arm", "cortex-m"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: System :: Hardware",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
     "mcp",
     "pygdbmi",
 ]
+
+[project.urls]
+Repository = "https://github.com/soundbytelabs/sbl-debugger"
 
 [project.optional-dependencies]
 dev = [

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.soundbytelabs/debugger",
+  "title": "sbl-debugger",
+  "description": "Embedded debug via GDB/MI and OpenOCD for ARM Cortex-M targets",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/soundbytelabs/sbl-debugger",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "sbl-debugger",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "suite": "sbl-embedded",
+      "related": [
+        "io.github.soundbytelabs/probe"
+      ]
+    }
+  }
+}

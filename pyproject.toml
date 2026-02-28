@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/soundbytelabs/sbl-debugger"
+Repository = "https://github.com/soundbytelabs/sbl-debugger-mcp"
 
 [project.optional-dependencies]
 dev = [

@@ -5,7 +5,7 @@
   "description": "Embedded debug via GDB/MI and OpenOCD for ARM Cortex-M targets",
   "version": "0.1.0",
   "repository": {
-    "url": "https://github.com/soundbytelabs/sbl-debugger",
+    "url": "https://github.com/soundbytelabs/sbl-debugger-mcp",
     "source": "github"
   },
   "packages": [

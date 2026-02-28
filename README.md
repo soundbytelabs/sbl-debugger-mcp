@@ -2,9 +2,9 @@
 
 # sbl-debugger
 
-Embedded debug MCP server for ARM Cortex-M targets. Gives Claude direct control of GDB and OpenOCD — attach to hardware, set breakpoints, step through code, inspect registers and memory, all within a conversation.
+Embedded debug MCP server for ARM Cortex-M targets. Gives AI coding assistants direct control of GDB and OpenOCD — attach to hardware, set breakpoints, step through code, inspect registers and memory, all within a conversation.
 
-Part of the [Sound Byte Labs](https://github.com/soundbytelabs) embedded tooling suite, alongside [sbl-probe](https://github.com/soundbytelabs/mcp-sbl-probe) for serial I/O.
+Part of the [Sound Byte Labs](https://github.com/soundbytelabs) embedded tooling suite, alongside [sbl-probe](https://github.com/soundbytelabs/sbl-probe-mcp) for serial I/O.
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ Register in `.mcp.json` at your workspace root:
 }
 ```
 
-Restart Claude Code and the tools are available immediately.
+Restart your MCP client and the tools are available immediately.
 
 ### System Requirements
 

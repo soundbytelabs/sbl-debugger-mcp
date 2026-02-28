@@ -6,37 +6,53 @@ Embedded debug MCP server for ARM Cortex-M targets. Gives AI coding assistants d
 
 Part of the [Sound Byte Labs](https://github.com/soundbytelabs) embedded tooling suite, alongside [sbl-probe](https://github.com/soundbytelabs/sbl-probe-mcp) for serial I/O.
 
-## Quick Start
+## Installation
+
+Create a virtual environment and install the package:
 
 ```bash
-# Install (editable, into SBL venv)
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install
 pip install -e .
 
 # Or with test dependencies
 pip install -e ".[dev]"
 ```
 
-Register in `.mcp.json` at your workspace root:
+### System Requirements
+
+- `gdb-multiarch` (GDB with ARM target support)
+- `openocd` (0.12.0+ recommended)
+- SWD debug probe (ST-LINK, CMSIS-DAP, etc.)
+
+On Debian/Ubuntu/Raspberry Pi OS:
+
+```bash
+sudo apt install gdb-multiarch openocd
+```
+
+## MCP Configuration
+
+Register the server in your MCP client's config. For most clients, add to `.mcp.json` in your project root:
 
 ```json
 {
   "mcpServers": {
     "sbl-debugger": {
       "type": "stdio",
-      "command": "/path/to/venv/bin/python",
+      "command": "/absolute/path/to/.venv/bin/python",
       "args": ["-m", "sbl_debugger"]
     }
   }
 }
 ```
 
+> **Important:** Use the absolute path to the Python binary inside your virtual environment.
+> For example: `/home/you/sbl-debugger-mcp/.venv/bin/python`
+
 Restart your MCP client and the tools are available immediately.
-
-### System Requirements
-
-- `gdb-multiarch` (GDB with ARM target support)
-- `openocd` (0.12.0+ recommended)
-- SWD debug probe (ST-LINK, CMSIS-DAP, etc.)
 
 ## Tools
 
@@ -100,10 +116,16 @@ Predefined profiles eliminate the need to remember OpenOCD configs:
 
 | Profile | Hardware | Debug Probe |
 |---------|----------|-------------|
-| `daisy` | Daisy Seed (STM32H750, Cortex-M7) | ST-LINK V3 |
+| `daisy` | Electrosmith Daisy Seed (STM32H750, Cortex-M7) | ST-LINK |
 | `pico` | Raspberry Pi Pico (RP2040, Cortex-M0+) | CMSIS-DAP Debug Probe |
 | `pico2` | Raspberry Pi Pico 2 (RP2350, Cortex-M33) | CMSIS-DAP Debug Probe |
 | `custom` | Any target | Provide `interface` and `target_cfg` explicitly |
+
+Custom targets work with any OpenOCD-supported hardware:
+
+```
+debug_attach(target="custom", interface="jlink.cfg", target_cfg="stm32f4x.cfg", elf="firmware.elf")
+```
 
 ## Architecture
 

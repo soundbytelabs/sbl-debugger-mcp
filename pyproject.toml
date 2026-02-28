@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sbl-debugger"
+version = "0.1.0"
+description = "Embedded debug MCP server for Claude Code — GDB/MI + OpenOCD"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp",
+    "pygdbmi",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sbl_debugger"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

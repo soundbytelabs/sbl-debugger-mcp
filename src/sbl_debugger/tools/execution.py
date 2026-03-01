@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pygdbmi.constants import GdbTimeoutError
+
 from sbl_debugger.bridge.types import MiResult, StopEvent
 from sbl_debugger.session.manager import SessionManager
 from sbl_debugger.tools.inspection import read_source_context
@@ -78,17 +80,28 @@ def register_tools(mcp, manager: SessionManager) -> None:
             session = manager.get(name)
 
             # First attempt: GDB -exec-interrupt
-            result = session.bridge.command("-exec-interrupt")
-            if result.is_error:
-                return {"error": result.error_msg}
-
-            stop = _stop_from_result(result)
-            if stop is None:
-                stop = session.bridge.wait_for_stop(timeout=3.0)
-            if stop is not None:
-                response = {"name": name, "state": "halted", **stop.to_dict()}
-                _add_source(response, stop)
-                return response
+            # This often times out when GDB is stuck after -exec-continue.
+            # pygdbmi raises GdbTimeoutError (a ValueError subclass) which
+            # we catch specifically so we can still try the TCL fallback.
+            gdb_interrupt_ok = False
+            try:
+                result = session.bridge.command("-exec-interrupt")
+                if result.is_error:
+                    # GDB responded but with an error — still try fallback
+                    pass
+                else:
+                    gdb_interrupt_ok = True
+                    stop = _stop_from_result(result)
+                    if stop is None:
+                        stop = session.bridge.wait_for_stop(timeout=3.0)
+                    if stop is not None:
+                        response = {"name": name, "state": "halted", **stop.to_dict()}
+                        _add_source(response, stop)
+                        return response
+            except GdbTimeoutError:
+                # GDB is unresponsive — expected when stuck after continue.
+                # Fall through to TCL fallback.
+                pass
 
             # Fallback: halt via OpenOCD TCL port (SWD-level, bypasses GDB)
             # When GDB is unresponsive after -exec-continue, this is the

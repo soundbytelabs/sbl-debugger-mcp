@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mcp.server.fastmcp import FastMCP
+from pygdbmi.constants import GdbTimeoutError
 
 from sbl_debugger.bridge.mi import MiBridge
 from sbl_debugger.bridge.types import MiResult, StopEvent, FrameInfo
@@ -238,18 +239,73 @@ class TestHalt:
         assert result["state"] == "unknown"
         assert "warning" in result
 
-    def test_halt_mi_error(self):
+    def test_halt_mi_error_falls_through_to_tcl(self):
+        """When -exec-interrupt returns an MI error, still try TCL fallback."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        stop = StopEvent(reason="signal-received", frame=FrameInfo(
+            func="main", address="0x08000100",
+        ))
+
+        with patch.object(
+            MiBridge, "command",
+            return_value=MiResult(message="error", payload={"msg": "The program is not being run."}),
+        ), patch.object(
+            OpenOcdProcess, "tcl_command",
+            return_value="",
+        ) as mock_tcl, patch.object(
+            MiBridge, "wait_for_stop",
+            return_value=stop,
+        ):
+            result = tools["halt"].fn(name="daisy")
+
+        mock_tcl.assert_called_once_with("halt")
+        assert result["state"] == "halted"
+        assert result["method"] == "openocd_tcl"
+
+    def test_halt_gdb_timeout_triggers_tcl_fallback(self):
+        """When pygdbmi times out on -exec-interrupt, fall through to TCL."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        stop = StopEvent(reason="signal-received", frame=FrameInfo(
+            func="audio_callback", line=50, address="0x08000300",
+        ))
+
+        with patch.object(
+            MiBridge, "command",
+            side_effect=GdbTimeoutError("Did not get response from gdb after 5.0 seconds"),
+        ), patch.object(
+            OpenOcdProcess, "tcl_command",
+            return_value="",
+        ) as mock_tcl, patch.object(
+            MiBridge, "wait_for_stop",
+            return_value=stop,
+        ):
+            result = tools["halt"].fn(name="daisy")
+
+        mock_tcl.assert_called_once_with("halt")
+        assert result["state"] == "halted"
+        assert result["method"] == "openocd_tcl"
+        assert result["frame"]["func"] == "audio_callback"
+
+    def test_halt_gdb_timeout_tcl_also_fails(self):
+        """When both GDB timeout and TCL fail, return unknown state."""
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
         with patch.object(
             MiBridge, "command",
-            return_value=MiResult(message="error", payload={"msg": "The program is not being run."}),
+            side_effect=GdbTimeoutError("Did not get response from gdb after 5.0 seconds"),
+        ), patch.object(
+            OpenOcdProcess, "tcl_command",
+            side_effect=RuntimeError("TCL command 'halt' failed: Connection refused"),
         ):
             result = tools["halt"].fn(name="daisy")
 
-        assert "error" in result
-        assert "not being run" in result["error"]
+        assert result["state"] == "unknown"
+        assert "warning" in result
 
 
 # -- Continue --

@@ -149,14 +149,21 @@ class TestOpenOcdProcess:
 
     @patch("sbl_debugger.process.openocd.shutil.which", return_value="/usr/bin/openocd")
     @patch("sbl_debugger.process.openocd.subprocess.Popen")
-    def test_disables_telnet_and_tcl(self, mock_popen_cls, mock_which):
+    def test_disables_telnet_enables_tcl(self, mock_popen_cls, mock_which):
         mock_proc = _make_mock_popen()
         mock_popen_cls.return_value = mock_proc
 
-        ocd = OpenOcdProcess("stlink.cfg", "stm32h7x.cfg")
+        ocd = OpenOcdProcess("stlink.cfg", "stm32h7x.cfg", tcl_port=6666)
         ocd.start(timeout=2.0)
 
         call_args = mock_popen_cls.call_args[0][0]
         assert "telnet_port disabled" in call_args
-        assert "tcl_port disabled" in call_args
+        assert "tcl_port 6666" in call_args
+        assert ocd.tcl_port == 6666
         ocd.stop()
+
+    def test_tcl_command_not_running(self):
+        """tcl_command raises when OpenOCD isn't running."""
+        ocd = OpenOcdProcess("stlink.cfg", "stm32h7x.cfg")
+        with pytest.raises(RuntimeError, match="not running"):
+            ocd.tcl_command("halt")

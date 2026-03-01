@@ -170,10 +170,10 @@ class TestHalt:
         assert result["state"] == "halted"
         assert result["frame"]["func"] == "delay_loop"
 
-    def test_halt_fallback_monitor_halt(self):
-        """When -exec-interrupt doesn't produce a stop, fall back to monitor halt."""
+    def test_halt_fallback_openocd_tcl(self):
+        """When -exec-interrupt doesn't produce a stop, fall back to OpenOCD TCL."""
         _, mgr, tools = _setup_tools()
-        _mock_attach(mgr)
+        session = _mock_attach(mgr)
 
         stop = StopEvent(reason="signal-received", frame=FrameInfo(
             func="HardFault_Handler", address="0x08000100",
@@ -184,19 +184,42 @@ class TestHalt:
             return_value=MiResult(message="done"),
         ), patch.object(
             MiBridge, "wait_for_stop",
-            side_effect=[None, stop],  # first call (GDB) fails, second (after monitor) succeeds
+            side_effect=[None, stop],  # first call (GDB) fails, second (after TCL halt) succeeds
         ), patch.object(
-            MiBridge, "monitor",
+            OpenOcdProcess, "tcl_command",
+            return_value="",
+        ) as mock_tcl:
+            result = tools["halt"].fn(name="daisy")
+
+        mock_tcl.assert_called_once_with("halt")
+        assert result["state"] == "halted"
+        assert result["method"] == "openocd_tcl"
+        assert result["frame"]["func"] == "HardFault_Handler"
+
+    def test_halt_tcl_succeeds_gdb_desynced(self):
+        """TCL halt works but GDB doesn't report stop — still returns halted."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        with patch.object(
+            MiBridge, "command",
             return_value=MiResult(message="done"),
+        ), patch.object(
+            MiBridge, "wait_for_stop",
+            return_value=None,  # GDB never reports stop
+        ), patch.object(
+            OpenOcdProcess, "tcl_command",
+            return_value="",
         ):
             result = tools["halt"].fn(name="daisy")
 
         assert result["state"] == "halted"
-        assert result["method"] == "monitor_halt"
-        assert result["frame"]["func"] == "HardFault_Handler"
+        assert result["method"] == "openocd_tcl"
+        assert "warning" in result
+        assert "desynchronized" in result["warning"]
 
     def test_halt_both_methods_fail(self):
-        """When both -exec-interrupt and monitor halt fail."""
+        """When both -exec-interrupt and OpenOCD TCL halt fail."""
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
@@ -207,8 +230,8 @@ class TestHalt:
             MiBridge, "wait_for_stop",
             return_value=None,
         ), patch.object(
-            MiBridge, "monitor",
-            return_value=MiResult(message="done"),
+            OpenOcdProcess, "tcl_command",
+            side_effect=RuntimeError("TCL command 'halt' failed: Connection refused"),
         ):
             result = tools["halt"].fn(name="daisy")
 

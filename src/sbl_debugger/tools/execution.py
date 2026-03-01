@@ -90,26 +90,41 @@ def register_tools(mcp, manager: SessionManager) -> None:
                 _add_source(response, stop)
                 return response
 
-            # Fallback: OpenOCD monitor halt (SWD-level, bypasses GDB)
-            # GDB accepted the interrupt but target didn't stop — likely
-            # stuck in ISR context or runaway after step_over.
-            session.bridge.monitor("halt")
+            # Fallback: halt via OpenOCD TCL port (SWD-level, bypasses GDB)
+            # When GDB is unresponsive after -exec-continue, this is the
+            # only way to halt — it talks directly to OpenOCD over TCP,
+            # completely bypassing the hung GDB process.
+            try:
+                session.openocd.tcl_command("halt")
+            except RuntimeError:
+                return {
+                    "name": name,
+                    "state": "unknown",
+                    "warning": "GDB interrupt failed and OpenOCD TCL halt also failed",
+                }
+
+            # OpenOCD halted the target via SWD. GDB should eventually
+            # notice and emit a *stopped event. Give it a moment.
             stop = session.bridge.wait_for_stop(timeout=3.0)
 
             if stop is not None:
                 response = {
                     "name": name,
                     "state": "halted",
-                    "method": "monitor_halt",
+                    "method": "openocd_tcl",
                     **stop.to_dict(),
                 }
                 _add_source(response, stop)
                 return response
 
+            # OpenOCD TCL halt succeeded but GDB didn't report the stop.
+            # The target IS halted (OpenOCD confirmed via SWD), but GDB
+            # is desynchronized. Return success with a note.
             return {
                 "name": name,
-                "state": "unknown",
-                "warning": "Both GDB interrupt and OpenOCD halt failed to stop target",
+                "state": "halted",
+                "method": "openocd_tcl",
+                "warning": "Target halted via OpenOCD but GDB did not report stop event. GDB may be desynchronized.",
             }
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}

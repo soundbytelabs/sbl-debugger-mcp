@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -14,6 +15,9 @@ class OpenOcdProcess:
     Launches OpenOCD with the given interface and target configs,
     waits for it to be ready (listening on the GDB port), and
     provides graceful shutdown.
+
+    Exposes a TCL port for direct command access that bypasses GDB.
+    This is critical for halting a target when GDB is unresponsive.
     """
 
     def __init__(
@@ -21,10 +25,12 @@ class OpenOcdProcess:
         interface: str,
         target_cfg: str,
         gdb_port: int = 3333,
+        tcl_port: int = 6666,
     ) -> None:
         self._interface = interface
         self._target_cfg = target_cfg
         self._gdb_port = gdb_port
+        self._tcl_port = tcl_port
         self._proc: subprocess.Popen | None = None
         self._stderr_lines: list[str] = []
         self._stderr_thread: threading.Thread | None = None
@@ -33,6 +39,10 @@ class OpenOcdProcess:
     @property
     def gdb_port(self) -> int:
         return self._gdb_port
+
+    @property
+    def tcl_port(self) -> int:
+        return self._tcl_port
 
     @property
     def is_alive(self) -> bool:
@@ -65,9 +75,9 @@ class OpenOcdProcess:
             "-f", f"interface/{self._interface}",
             "-f", f"target/{self._target_cfg}",
             "-c", f"gdb_port {self._gdb_port}",
-            # Disable telnet and TCL ports to avoid contention
             "-c", "telnet_port disabled",
-            "-c", "tcl_port disabled",
+            # TCL port enabled for direct command access (halt fallback)
+            "-c", f"tcl_port {self._tcl_port}",
         ]
 
         self._ready_event.clear()
@@ -114,6 +124,39 @@ class OpenOcdProcess:
                 self._proc.wait(timeout=2)
 
         self._proc = None
+
+    def tcl_command(self, cmd: str, timeout: float = 3.0) -> str:
+        """Send a command directly to OpenOCD's TCL port.
+
+        Bypasses GDB entirely — uses a raw TCP socket to OpenOCD's
+        TCL server. Essential for halting a target when GDB is
+        unresponsive after -exec-continue.
+
+        OpenOCD TCL protocol: send command + \\x1a, receive response + \\x1a.
+
+        Returns the response text, or raises RuntimeError on failure.
+        """
+        if not self.is_alive:
+            raise RuntimeError("OpenOCD is not running")
+
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout)
+                s.connect(("127.0.0.1", self._tcl_port))
+                # OpenOCD TCL protocol uses \x1a as command delimiter
+                s.sendall(cmd.encode("utf-8") + b"\x1a")
+                # Read response until \x1a delimiter
+                data = b""
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if b"\x1a" in data:
+                        break
+                return data.rstrip(b"\x1a").decode("utf-8", errors="replace").strip()
+        except (OSError, socket.timeout) as e:
+            raise RuntimeError(f"TCL command '{cmd}' failed: {e}")
 
     def _read_stderr(self) -> None:
         """Read OpenOCD stderr, detect readiness."""

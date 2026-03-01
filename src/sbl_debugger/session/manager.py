@@ -6,7 +6,7 @@ import threading
 
 from sbl_debugger.bridge.mi import MiBridge
 from sbl_debugger.process.openocd import OpenOcdProcess
-from sbl_debugger.process.ports import find_available_port
+from sbl_debugger.process.ports import find_available_ports
 from sbl_debugger.session.session import DebugSession
 from sbl_debugger.targets import TargetProfile
 
@@ -49,14 +49,15 @@ class SessionManager:
             if name in self._sessions:
                 raise ValueError(f"Session '{name}' already exists")
 
-        # Find an available port (outside lock — no I/O under lock)
-        gdb_port = find_available_port()
+        # Find available ports (outside lock — no I/O under lock)
+        ports = find_available_ports()
 
         # Launch OpenOCD
         openocd = OpenOcdProcess(
             interface=target_profile.openocd_interface,
             target_cfg=target_profile.openocd_target,
-            gdb_port=gdb_port,
+            gdb_port=ports.gdb,
+            tcl_port=ports.tcl,
         )
         try:
             openocd.start()
@@ -77,7 +78,7 @@ class SessionManager:
                         f"Failed to load ELF: {result.error_msg}"
                     )
 
-            result = bridge.connect(port=gdb_port)
+            result = bridge.connect(port=ports.gdb)
             if result.is_error:
                 raise RuntimeError(
                     f"GDB failed to connect to OpenOCD: {result.error_msg}"

@@ -102,6 +102,18 @@ Restart your MCP client and the tools are available immediately.
 | `breakpoint_list` | List all breakpoints and watchpoints |
 | `watchpoint_set` | Set a hardware data watchpoint (write/read/access) |
 
+### Peripheral Registers (SVD)
+
+| Tool | Description |
+|------|-------------|
+| `list_peripherals` | List SVD peripherals with base addresses and register counts |
+| `list_registers` | Show all registers and bitfield definitions for a peripheral |
+| `read_peripheral_register` | Read a register from hardware and decode all bitfields |
+| `read_peripheral` | Read all registers of a peripheral with decoded bitfields |
+
+> Requires `cecrops` (optional dependency) and `SBL_HW_PATH` environment variable pointing to sbl-hardware.
+> Install with: `pip install -e ".[svd]"`
+
 ### Snapshot & Advanced
 
 | Tool | Description |
@@ -142,13 +154,17 @@ sbl_debugger/
 ├── bridge/
 │   ├── mi.py          # GDB/MI wrapper (pygdbmi + lock)
 │   └── types.py       # FrameInfo, StopEvent, MiResult
+├── svd/
+│   ├── peripheral_db.py  # SVD lookup/decode (wraps cecrops Device)
+│   └── loader.py         # SBL_HW_PATH resolution, cecrops import guard
 └── tools/
     ├── session.py     # attach, detach, sessions, status, targets
     ├── execution.py   # halt, continue, step, reset
     ├── inspection.py  # registers, memory, backtrace, locals
     ├── breakpoints.py # breakpoint/watchpoint management
     ├── snapshot.py    # combined state dump
-    └── advanced.py    # load (flash), monitor (raw OpenOCD)
+    ├── advanced.py    # load (flash), monitor (raw OpenOCD)
+    └── peripheral.py  # SVD peripheral register decoding
 ```
 
 Key design decisions:
@@ -162,7 +178,7 @@ Key design decisions:
 ## Running Tests
 
 ```bash
-pytest                    # 198 tests (all mocked, no hardware needed)
+pytest                    # 275 tests (all mocked, no hardware needed)
 pytest -v                 # verbose
 pytest tests/test_tools.py  # just tool tests
 ```
@@ -171,4 +187,5 @@ pytest tests/test_tools.py  # just tool tests
 
 - `mcp` — Official Python MCP SDK (FastMCP)
 - `pygdbmi` — GDB Machine Interface protocol
+- `cecrops` — SVD register definitions (optional, for peripheral tools)
 - Python >= 3.11

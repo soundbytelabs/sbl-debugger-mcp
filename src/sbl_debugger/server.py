@@ -11,6 +11,7 @@ from sbl_debugger.tools import advanced as advanced_tools
 from sbl_debugger.tools import breakpoints as breakpoint_tools
 from sbl_debugger.tools import execution as execution_tools
 from sbl_debugger.tools import inspection as inspection_tools
+from sbl_debugger.tools import peripheral as peripheral_tools
 from sbl_debugger.tools import session as session_tools
 from sbl_debugger.tools import snapshot as snapshot_tools
 
@@ -26,4 +27,5 @@ execution_tools.register_tools(mcp, _manager)
 inspection_tools.register_tools(mcp, _manager)
 breakpoint_tools.register_tools(mcp, _manager)
 snapshot_tools.register_tools(mcp, _manager)
+peripheral_tools.register_tools(mcp, _manager)
 advanced_tools.register_tools(mcp, _manager)

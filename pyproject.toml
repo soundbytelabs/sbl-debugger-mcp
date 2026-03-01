@@ -28,6 +28,9 @@ dependencies = [
 Repository = "https://github.com/soundbytelabs/sbl-debugger-mcp"
 
 [project.optional-dependencies]
+svd = [
+    "cecrops",
+]
 dev = [
     "pytest",
     "pytest-asyncio",

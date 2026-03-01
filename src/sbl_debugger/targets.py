@@ -12,13 +12,17 @@ class TargetProfile:
     description: str
     openocd_interface: str
     openocd_target: str
+    mcu: str | None = None
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "description": self.description,
             "openocd_interface": self.openocd_interface,
             "openocd_target": self.openocd_target,
         }
+        if self.mcu:
+            result["mcu"] = self.mcu
+        return result
 
 
 TARGET_PROFILES: dict[str, TargetProfile] = {
@@ -26,6 +30,7 @@ TARGET_PROFILES: dict[str, TargetProfile] = {
         description="Daisy Seed (STM32H750) via ST-LINK V3",
         openocd_interface="stlink.cfg",
         openocd_target="stm32h7x.cfg",
+        mcu="stm32h750",
     ),
     "pico": TargetProfile(
         description="Raspberry Pi Pico (RP2040) via Debug Probe",

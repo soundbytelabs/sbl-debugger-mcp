@@ -68,31 +68,49 @@ def register_tools(mcp, manager: SessionManager) -> None:
         """Halt execution on a running target.
 
         Sends an interrupt and waits for the target to stop.
+        If GDB's interrupt doesn't work (e.g., stuck in ISR context),
+        falls back to OpenOCD's SWD-level halt.
 
         Args:
             name: Session name.
         """
         try:
             session = manager.get(name)
+
+            # First attempt: GDB -exec-interrupt
             result = session.bridge.command("-exec-interrupt")
             if result.is_error:
                 return {"error": result.error_msg}
 
-            # Wait for the *stopped event
             stop = _stop_from_result(result)
             if stop is None:
-                stop = session.bridge.wait_for_stop(timeout=5.0)
+                stop = session.bridge.wait_for_stop(timeout=3.0)
+            if stop is not None:
+                response = {"name": name, "state": "halted", **stop.to_dict()}
+                _add_source(response, stop)
+                return response
 
-            if stop is None:
-                return {
+            # Fallback: OpenOCD monitor halt (SWD-level, bypasses GDB)
+            # GDB accepted the interrupt but target didn't stop — likely
+            # stuck in ISR context or runaway after step_over.
+            session.bridge.monitor("halt")
+            stop = session.bridge.wait_for_stop(timeout=3.0)
+
+            if stop is not None:
+                response = {
                     "name": name,
-                    "state": "unknown",
-                    "warning": "Interrupt sent but no stop event received",
+                    "state": "halted",
+                    "method": "monitor_halt",
+                    **stop.to_dict(),
                 }
+                _add_source(response, stop)
+                return response
 
-            response = {"name": name, "state": "halted", **stop.to_dict()}
-            _add_source(response, stop)
-            return response
+            return {
+                "name": name,
+                "state": "unknown",
+                "warning": "Both GDB interrupt and OpenOCD halt failed to stop target",
+            }
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}
 

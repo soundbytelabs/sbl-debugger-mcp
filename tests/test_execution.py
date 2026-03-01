@@ -170,7 +170,33 @@ class TestHalt:
         assert result["state"] == "halted"
         assert result["frame"]["func"] == "delay_loop"
 
-    def test_halt_no_stop_event(self):
+    def test_halt_fallback_monitor_halt(self):
+        """When -exec-interrupt doesn't produce a stop, fall back to monitor halt."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        stop = StopEvent(reason="signal-received", frame=FrameInfo(
+            func="HardFault_Handler", address="0x08000100",
+        ))
+
+        with patch.object(
+            MiBridge, "command",
+            return_value=MiResult(message="done"),
+        ), patch.object(
+            MiBridge, "wait_for_stop",
+            side_effect=[None, stop],  # first call (GDB) fails, second (after monitor) succeeds
+        ), patch.object(
+            MiBridge, "monitor",
+            return_value=MiResult(message="done"),
+        ):
+            result = tools["halt"].fn(name="daisy")
+
+        assert result["state"] == "halted"
+        assert result["method"] == "monitor_halt"
+        assert result["frame"]["func"] == "HardFault_Handler"
+
+    def test_halt_both_methods_fail(self):
+        """When both -exec-interrupt and monitor halt fail."""
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
@@ -180,6 +206,9 @@ class TestHalt:
         ), patch.object(
             MiBridge, "wait_for_stop",
             return_value=None,
+        ), patch.object(
+            MiBridge, "monitor",
+            return_value=MiResult(message="done"),
         ):
             result = tools["halt"].fn(name="daisy")
 

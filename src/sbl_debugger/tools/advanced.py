@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import time
+
 from sbl_debugger.session.manager import SessionManager
+from sbl_debugger.tools.execution import _resync_gdb
 
 
 def register_tools(mcp, manager: SessionManager) -> None:
@@ -56,6 +59,12 @@ def register_tools(mcp, manager: SessionManager) -> None:
 
             # Reset and halt after flash
             session.bridge.monitor("reset halt")
+            time.sleep(0.1)  # Let OpenOCD settle after reset
+
+            # Force GDB to re-query target state
+            _resync_gdb(session)
+            session.target_state.set_halted()
+
             session.bridge.drain_events()
             stats["state"] = "halted"
 

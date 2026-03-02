@@ -7,6 +7,43 @@ from sbl_debugger.session.manager import SessionManager
 from sbl_debugger.tools.inspection import CORE_REGISTERS, read_source_context
 
 
+def _update_state_from_events(session, events: list[dict]) -> None:
+    """Process GDB async events and update target state."""
+    for e in events:
+        msg = e.get("message")
+        if msg == "stopped":
+            payload = e.get("payload", {})
+            if isinstance(payload, dict):
+                stop = StopEvent.from_mi(payload)
+                session.target_state.set_halted(stop)
+        elif msg == "running":
+            session.target_state.set_running()
+
+
+def _query_thread_state(session) -> None:
+    """Actively query GDB for target state via -thread-info.
+
+    Updates session.target_state based on thread states.
+    """
+    try:
+        result = session.bridge.command("-thread-info", timeout=2.0)
+        if result.is_error:
+            return
+        payload = result.payload
+        if not isinstance(payload, dict):
+            return
+        threads = payload.get("threads", [])
+        for t in threads:
+            if t.get("state") == "stopped":
+                session.target_state.set_halted()
+                return
+        # If we got threads but none are stopped, target is running
+        if threads:
+            session.target_state.set_running()
+    except Exception:
+        pass
+
+
 def register_tools(mcp, manager: SessionManager) -> None:
     """Register snapshot tools with the MCP server."""
 
@@ -24,31 +61,32 @@ def register_tools(mcp, manager: SessionManager) -> None:
         try:
             session = manager.get(name)
 
-            # 1. Drain events to determine current state
-            events = session.bridge.drain_events()
-            last_stop = None
-            is_running = True
-            for e in events:
-                msg = e.get("message")
-                if msg == "stopped":
-                    payload = e.get("payload", {})
-                    if isinstance(payload, dict):
-                        last_stop = StopEvent.from_mi(payload)
-                    is_running = False
-                elif msg == "running":
-                    is_running = True
-                    last_stop = None
+            # 1. Check persistent state first
+            state = session.target_state.state
 
-            if is_running:
+            # 2. Drain any pending events (may update state)
+            events = session.bridge.drain_events()
+            _update_state_from_events(session, events)
+
+            # 3. If state is still unknown or running, actively query GDB
+            if session.target_state.state in ("unknown", "running"):
+                _query_thread_state(session)
+
+            # 4. Act on confirmed state
+            current_state = session.target_state.state
+            if current_state == "running":
                 return {"name": name, "state": "running"}
+            if current_state == "unknown":
+                return {"name": name, "state": "unknown"}
 
             result: dict = {"name": name, "state": "halted"}
 
+            # Use last_stop from target_state (persists across tool calls)
+            last_stop = session.target_state.last_stop
             if last_stop:
                 result["reason"] = last_stop.reason
                 if last_stop.frame:
                     result["frame"] = last_stop.frame.to_dict()
-                    # Source context from frame
                     source = read_source_context(
                         last_stop.frame.file, last_stop.frame.line
                     )

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
+
 from pygdbmi.constants import GdbTimeoutError
 
 from sbl_debugger.bridge.types import MiResult, StopEvent
 from sbl_debugger.session.manager import SessionManager
+from sbl_debugger.session.session import DebugSession
 from sbl_debugger.tools.inspection import read_source_context
 
 
@@ -27,36 +30,69 @@ def _add_source(result: dict, stop: StopEvent | None) -> None:
             result["source"] = source
 
 
+def _resync_gdb(session: DebugSession) -> bool:
+    """Attempt to resynchronize GDB after an OpenOCD-level halt.
+
+    Pokes GDB with -exec-interrupt (no-op if target already halted,
+    but forces GDB to re-query target state via SWD), then verifies
+    GDB is responsive with -thread-info.
+    """
+    try:
+        session.bridge.command("-exec-interrupt", timeout=2.0)
+        session.bridge.drain_events()
+        result = session.bridge.command("-thread-info", timeout=2.0)
+        return not result.is_error
+    except Exception:
+        return False
+
+
 def _step_command(
     manager: SessionManager, name: str, mi_cmd: str, count: int = 1
 ) -> dict:
     """Common logic for step-like commands.
 
-    Sends the MI command (with optional count), waits for the target to stop,
-    and returns the new frame info with source context.
+    For count > 1, loops single steps to avoid GDB's unreliable multi-step.
+    Each step waits up to 10s for the target to stop. Aborts early on
+    breakpoint hits or unexpected stop reasons.
     """
     try:
         session = manager.get(name)
-        cmd = f"{mi_cmd} {count}" if count > 1 else mi_cmd
-        result = session.bridge.command(cmd)
-        if result.is_error:
-            return {"error": result.error_msg}
+        last_stop = None
 
-        # Step commands usually produce *stopped in the same response batch
-        stop = _stop_from_result(result)
-        if stop is None:
-            # Didn't arrive yet — wait briefly
-            stop = session.bridge.wait_for_stop(timeout=5.0)
+        for i in range(count):
+            # Always send single-step commands
+            result = session.bridge.command(mi_cmd)
+            if result.is_error:
+                return {"error": result.error_msg}
 
-        if stop is None:
-            return {"name": name, "state": "running"}
+            # Step commands usually produce *stopped in the same response batch
+            stop = _stop_from_result(result)
+            if stop is None:
+                # Didn't arrive yet — wait with increased timeout
+                stop = session.bridge.wait_for_stop(timeout=10.0)
+
+            if stop is None:
+                session.target_state.set_running()
+                response: dict = {"name": name, "state": "running"}
+                if i > 0:
+                    response["completed_steps"] = i
+                return response
+
+            last_stop = stop
+            session.target_state.set_halted(stop)
+
+            # Abort early on breakpoint hit or non-step stop reason
+            if stop.reason not in ("end-stepping-range",):
+                break
 
         result_dict: dict = {
             "name": name,
             "state": "halted",
-            **stop.to_dict(),
+            **last_stop.to_dict(),
         }
-        _add_source(result_dict, stop)
+        if count > 1:
+            result_dict["completed_steps"] = i + 1
+        _add_source(result_dict, last_stop)
         return result_dict
     except (ValueError, RuntimeError) as e:
         return {"error": str(e)}
@@ -80,33 +116,26 @@ def register_tools(mcp, manager: SessionManager) -> None:
             session = manager.get(name)
 
             # First attempt: GDB -exec-interrupt
-            # This often times out when GDB is stuck after -exec-continue.
             # pygdbmi raises GdbTimeoutError (a ValueError subclass) which
             # we catch specifically so we can still try the TCL fallback.
-            gdb_interrupt_ok = False
             try:
                 result = session.bridge.command("-exec-interrupt")
                 if result.is_error:
-                    # GDB responded but with an error — still try fallback
-                    pass
+                    pass  # GDB responded but with error — try fallback
                 else:
-                    gdb_interrupt_ok = True
                     stop = _stop_from_result(result)
                     if stop is None:
                         stop = session.bridge.wait_for_stop(timeout=3.0)
                     if stop is not None:
+                        session.target_state.set_halted(stop)
                         response = {"name": name, "state": "halted", **stop.to_dict()}
                         _add_source(response, stop)
                         return response
             except GdbTimeoutError:
-                # GDB is unresponsive — expected when stuck after continue.
-                # Fall through to TCL fallback.
+                # GDB is unresponsive — fall through to TCL fallback.
                 pass
 
             # Fallback: halt via OpenOCD TCL port (SWD-level, bypasses GDB)
-            # When GDB is unresponsive after -exec-continue, this is the
-            # only way to halt — it talks directly to OpenOCD over TCP,
-            # completely bypassing the hung GDB process.
             try:
                 session.openocd.tcl_command("halt")
             except RuntimeError:
@@ -116,11 +145,16 @@ def register_tools(mcp, manager: SessionManager) -> None:
                     "warning": "GDB interrupt failed and OpenOCD TCL halt also failed",
                 }
 
-            # OpenOCD halted the target via SWD. GDB should eventually
-            # notice and emit a *stopped event. Give it a moment.
-            stop = session.bridge.wait_for_stop(timeout=3.0)
+            # Target IS halted (OpenOCD confirmed via SWD)
+            session.target_state.set_halted()
 
+            # Try to resync GDB so subsequent commands work
+            _resync_gdb(session)
+
+            # Check if GDB now reports the stop
+            stop = session.bridge.wait_for_stop(timeout=1.0)
             if stop is not None:
+                session.target_state.set_halted(stop)
                 response = {
                     "name": name,
                     "state": "halted",
@@ -130,9 +164,6 @@ def register_tools(mcp, manager: SessionManager) -> None:
                 _add_source(response, stop)
                 return response
 
-            # OpenOCD TCL halt succeeded but GDB didn't report the stop.
-            # The target IS halted (OpenOCD confirmed via SWD), but GDB
-            # is desynchronized. Return success with a note.
             return {
                 "name": name,
                 "state": "halted",
@@ -157,6 +188,7 @@ def register_tools(mcp, manager: SessionManager) -> None:
             result = session.bridge.command("-exec-continue")
             if result.is_error:
                 return {"error": result.error_msg}
+            session.target_state.set_running()
             return {"name": name, "state": "running"}
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}
@@ -176,6 +208,7 @@ def register_tools(mcp, manager: SessionManager) -> None:
             stop = session.bridge.wait_for_stop(timeout=timeout)
             if stop is None:
                 return {"name": name, "state": "running", "timeout": True}
+            session.target_state.set_halted(stop)
             response = {"name": name, "state": "halted", **stop.to_dict()}
             _add_source(response, stop)
             return response
@@ -245,6 +278,7 @@ def register_tools(mcp, manager: SessionManager) -> None:
             cont_result = session.bridge.command("-exec-continue")
             if cont_result.is_error:
                 return {"error": cont_result.error_msg}
+            session.target_state.set_running()
 
             # Wait for the target to hit the temp breakpoint
             stop = session.bridge.wait_for_stop(timeout=30.0)
@@ -255,6 +289,7 @@ def register_tools(mcp, manager: SessionManager) -> None:
                     "warning": "Target did not reach location within timeout",
                 }
 
+            session.target_state.set_halted(stop)
             response = {"name": name, "state": "halted", **stop.to_dict()}
             _add_source(response, stop)
             return response
@@ -279,17 +314,20 @@ def register_tools(mcp, manager: SessionManager) -> None:
             state = "halted" if halt else "running"
             response: dict = {"name": name, "state": state}
 
-            # After reset halt, try to get the current frame
             if halt:
+                session.target_state.set_halted()
                 events = session.bridge.drain_events()
                 for e in events:
                     if e.get("message") == "stopped":
                         payload = e.get("payload", {})
                         if isinstance(payload, dict):
                             stop = StopEvent.from_mi(payload)
+                            session.target_state.set_halted(stop)
                             if stop.frame:
                                 response["frame"] = stop.frame.to_dict()
                             _add_source(response, stop)
+            else:
+                session.target_state.set_running()
 
             return response
         except (ValueError, RuntimeError) as e:

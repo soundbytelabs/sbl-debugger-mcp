@@ -8,6 +8,7 @@ from typing import Any
 
 from sbl_debugger.bridge.mi import MiBridge
 from sbl_debugger.process.openocd import OpenOcdProcess
+from sbl_debugger.session.state import TargetState
 
 
 @dataclass
@@ -21,6 +22,7 @@ class DebugSession:
     elf_path: str | None = None
     created_at: float = field(default_factory=time.monotonic)
     svd: Any = None  # PeripheralDb, lazy-loaded on first peripheral tool call
+    target_state: TargetState = field(default_factory=TargetState)
 
     @property
     def is_alive(self) -> bool:

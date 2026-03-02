@@ -42,15 +42,39 @@ class TestSnapshotErrors:
 
 
 class TestSnapshotRunning:
-    def test_returns_running_when_no_stop_event(self):
+    def test_returns_running_when_thread_info_says_running(self):
+        """When no events and -thread-info shows running threads → running."""
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
-        with patch.object(MiBridge, "drain_events", return_value=[]):
+        thread_info = {"threads": [{"id": "1", "state": "running"}]}
+
+        def mock_command(cmd, timeout=5.0):
+            if "-thread-info" in cmd:
+                return MiResult(message="done", payload=thread_info)
+            return MiResult(message="done")
+
+        with patch.object(MiBridge, "drain_events", return_value=[]), \
+             patch.object(MiBridge, "command", side_effect=mock_command):
             result = tools["debug_snapshot"].fn(name="daisy")
 
-        # No stop events → assume running
         assert result["state"] == "running"
+
+    def test_returns_unknown_when_no_info_available(self):
+        """When no events, no thread info → unknown (not falsely 'running')."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        def mock_command(cmd, timeout=5.0):
+            if "-thread-info" in cmd:
+                return MiResult(message="error", payload={"msg": "No threads"})
+            return MiResult(message="done")
+
+        with patch.object(MiBridge, "drain_events", return_value=[]), \
+             patch.object(MiBridge, "command", side_effect=mock_command):
+            result = tools["debug_snapshot"].fn(name="daisy")
+
+        assert result["state"] == "unknown"
 
     def test_returns_running_after_running_event(self):
         _, mgr, tools = _setup_tools()
@@ -67,6 +91,35 @@ class TestSnapshotRunning:
             result = tools["debug_snapshot"].fn(name="daisy")
 
         assert result["state"] == "running"
+
+    def test_halted_persists_across_tool_calls(self):
+        """After halt sets state, snapshot sees halted even with no new events."""
+        _, mgr, tools = _setup_tools()
+        session = _mock_attach(mgr)
+
+        # Simulate halt setting the persistent state
+        stop = StopEvent(
+            reason="signal-received",
+            frame=FrameInfo(func="main", line=42, address="0x08000150"),
+        )
+        session.target_state.set_halted(stop)
+
+        def mock_command(cmd, timeout=5.0):
+            if "register-names" in cmd:
+                return MiResult(message="done", payload={"register-names": []})
+            elif "-stack-list-frames" in cmd:
+                return MiResult(message="done", payload={"stack": []})
+            elif "-stack-list-variables" in cmd:
+                return MiResult(message="done", payload={"variables": []})
+            return MiResult(message="done")
+
+        with patch.object(MiBridge, "drain_events", return_value=[]), \
+             patch.object(MiBridge, "command", side_effect=mock_command):
+            result = tools["debug_snapshot"].fn(name="daisy")
+
+        assert result["state"] == "halted"
+        assert result["reason"] == "signal-received"
+        assert result["frame"]["func"] == "main"
 
 
 class TestSnapshotHalted:

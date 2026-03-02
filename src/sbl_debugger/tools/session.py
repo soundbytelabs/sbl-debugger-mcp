@@ -57,6 +57,9 @@ def register_tools(mcp, manager: SessionManager) -> None:
             # Halt the target after attach
             halt_result = session.bridge.monitor("reset halt")
 
+            # Mark state as halted after attach
+            session.target_state.set_halted()
+
             result = {
                 "status": "attached",
                 "state": "halted",
@@ -70,6 +73,7 @@ def register_tools(mcp, manager: SessionManager) -> None:
                     payload = e.get("payload", {})
                     if isinstance(payload, dict):
                         stop = StopEvent.from_mi(payload)
+                        session.target_state.set_halted(stop)
                         if stop.frame:
                             result["frame"] = stop.frame.to_dict()
 
@@ -119,27 +123,47 @@ def register_tools(mcp, manager: SessionManager) -> None:
                     "error": "Session is no longer alive (OpenOCD or GDB died)",
                 }
 
-            # Drain any pending events
-            events = session.bridge.drain_events()
+            # 1. Check persistent state first
+            state = session.target_state.state
 
-            # Look for the most recent stop event
+            # 2. Drain any pending events (may update state)
+            events = session.bridge.drain_events()
             last_stop = None
-            is_running = True
             for e in events:
                 msg = e.get("message")
                 if msg == "stopped":
                     payload = e.get("payload", {})
                     if isinstance(payload, dict):
-                        last_stop = StopEvent.from_mi(payload)
-                    is_running = False
+                        stop = StopEvent.from_mi(payload)
+                        session.target_state.set_halted(stop)
+                        last_stop = stop
                 elif msg == "running":
-                    is_running = True
-                    last_stop = None
+                    session.target_state.set_running()
 
+            # 3. If state is still unknown or running, actively query GDB
+            if session.target_state.state in ("unknown", "running"):
+                try:
+                    thread_result = session.bridge.command("-thread-info", timeout=2.0)
+                    if not thread_result.is_error:
+                        payload = thread_result.payload
+                        if isinstance(payload, dict):
+                            threads = payload.get("threads", [])
+                            for t in threads:
+                                if t.get("state") == "stopped":
+                                    session.target_state.set_halted()
+                                    break
+                except Exception:
+                    pass  # Non-fatal
+
+            # 4. Build response from confirmed state
             result: dict = {
                 "name": name,
-                "state": "running" if is_running else "halted",
+                "state": session.target_state.state,
             }
+
+            # Use last_stop from events or from persistent state
+            if last_stop is None:
+                last_stop = session.target_state.last_stop
 
             if last_stop:
                 result["reason"] = last_stop.reason

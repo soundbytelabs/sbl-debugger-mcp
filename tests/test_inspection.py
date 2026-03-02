@@ -486,34 +486,78 @@ class TestReadLocals:
 # -- print_expr --
 
 class TestPrintExpr:
-    def test_evaluate_expression(self):
+    def test_evaluate_expression_via_var_create(self):
+        """Variable objects provide value + type."""
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
-        payload = {"value": "42"}
-        with patch.object(
-            MiBridge, "command",
-            return_value=MiResult(message="done", payload=payload),
-        ):
+        def mock_command(cmd, timeout=5.0):
+            if "-var-create" in cmd:
+                return MiResult(message="done", payload={
+                    "name": "var1", "value": "42", "type": "int", "numchild": "0",
+                })
+            if "-var-delete" in cmd:
+                return MiResult(message="done")
+            return MiResult(message="done")
+
+        with patch.object(MiBridge, "command", side_effect=mock_command):
             result = tools["print_expr"].fn(name="daisy", expression="x + 1")
 
         assert result["value"] == "42"
+        assert result["type"] == "int"
         assert result["expression"] == "x + 1"
 
-    def test_evaluate_pointer_deref(self):
+    def test_evaluate_struct_expands_fields(self):
+        """Structs with children expand one level."""
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
-        payload = {"value": "{field1 = 0, field2 = 100}"}
-        with patch.object(
-            MiBridge, "command",
-            return_value=MiResult(message="done", payload=payload),
-        ):
+        def mock_command(cmd, timeout=5.0):
+            if "-var-create" in cmd:
+                return MiResult(message="done", payload={
+                    "name": "var2", "value": "{...}", "type": "MyStruct", "numchild": "2",
+                })
+            if "-var-list-children" in cmd:
+                return MiResult(message="done", payload={
+                    "children": [
+                        {"child": {"exp": "field1", "value": "0", "type": "int"}},
+                        {"child": {"exp": "field2", "value": "100", "type": "int"}},
+                    ],
+                })
+            if "-var-delete" in cmd:
+                return MiResult(message="done")
+            return MiResult(message="done")
+
+        with patch.object(MiBridge, "command", side_effect=mock_command):
             result = tools["print_expr"].fn(name="daisy", expression="*my_struct_ptr")
 
-        assert "field1" in result["value"]
+        assert result["type"] == "MyStruct"
+        assert "fields" in result
+        assert len(result["fields"]) == 2
+        assert result["fields"][0]["name"] == "field1"
+        assert result["fields"][1]["value"] == "100"
+
+    def test_var_create_fails_falls_back_to_raw_eval(self):
+        """When -var-create fails, falls back to -data-evaluate-expression."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        def mock_command(cmd, timeout=5.0):
+            if "-var-create" in cmd:
+                return MiResult(message="error", payload={"msg": "Cannot create"})
+            if "-data-evaluate-expression" in cmd:
+                return MiResult(message="done", payload={"value": "42"})
+            return MiResult(message="done")
+
+        with patch.object(MiBridge, "command", side_effect=mock_command):
+            result = tools["print_expr"].fn(name="daisy", expression="x + 1")
+
+        assert result["value"] == "42"
+        # No type info from raw eval
+        assert "type" not in result
 
     def test_evaluate_mi_error(self):
+        """Both var-create and raw eval fail."""
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
@@ -529,14 +573,22 @@ class TestPrintExpr:
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
-        with patch.object(
-            MiBridge, "command",
-            return_value=MiResult(message="done", payload={"value": "1"}),
-        ) as mock_cmd:
+        def mock_command(cmd, timeout=5.0):
+            if "-var-create" in cmd:
+                return MiResult(message="done", payload={
+                    "name": "var3", "value": "6", "type": "unsigned long", "numchild": "0",
+                })
+            if "-var-delete" in cmd:
+                return MiResult(message="done")
+            return MiResult(message="done")
+
+        with patch.object(MiBridge, "command", side_effect=mock_command) as mock_cmd:
             tools["print_expr"].fn(name="daisy", expression='sizeof("hello")')
 
-        call_args = mock_cmd.call_args[0][0]
-        assert '\\"hello\\"' in call_args
+        # First call should be -var-create with escaped quotes
+        first_call = mock_cmd.call_args_list[0][0][0]
+        assert "-var-create" in first_call
+        assert '\\"hello\\"' in first_call
 
 
 # -- disassemble --

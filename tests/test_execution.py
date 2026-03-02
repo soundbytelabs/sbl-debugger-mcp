@@ -392,6 +392,7 @@ class TestStep:
         assert result["frame"]["line"] == 43
 
     def test_step_with_count(self):
+        """count > 1 loops single steps instead of sending multi-step to GDB."""
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
@@ -409,9 +410,12 @@ class TestStep:
         with patch.object(MiBridge, "command", return_value=mi_result) as mock_cmd:
             result = tools["step"].fn(name="daisy", count=5)
 
-        mock_cmd.assert_called_once_with("-exec-step 5")
+        # Loop-based: 5 individual -exec-step calls
+        assert mock_cmd.call_count == 5
+        mock_cmd.assert_called_with("-exec-step")
         assert result["state"] == "halted"
         assert result["frame"]["line"] == 50
+        assert result["completed_steps"] == 5
 
     def test_step_count_1_sends_no_count(self):
         """count=1 should not append the count to the command."""
@@ -508,7 +512,8 @@ class TestStepOver:
         with patch.object(MiBridge, "command", return_value=mi_result) as mock_cmd:
             result = tools["step_over"].fn(name="daisy", count=3)
 
-        mock_cmd.assert_called_once_with("-exec-next 3")
+        assert mock_cmd.call_count == 3
+        mock_cmd.assert_called_with("-exec-next")
         assert result["state"] == "halted"
 
 
@@ -576,7 +581,8 @@ class TestStepInstruction:
         with patch.object(MiBridge, "command", return_value=mi_result) as mock_cmd:
             result = tools["step_instruction"].fn(name="daisy", count=10)
 
-        mock_cmd.assert_called_once_with("-exec-step-instruction 10")
+        assert mock_cmd.call_count == 10
+        mock_cmd.assert_called_with("-exec-step-instruction")
         assert result["state"] == "halted"
 
 

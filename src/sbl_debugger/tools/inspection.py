@@ -303,23 +303,67 @@ def register_tools(mcp, manager: SessionManager) -> None:
         """
         try:
             session = manager.get(name)
-            # Escape quotes in the expression
             escaped = expression.replace('"', '\\"')
-            result = session.bridge.command(
-                f'-data-evaluate-expression "{escaped}"'
-            )
-            if result.is_error:
-                return {"error": result.error_msg}
 
-            payload = result.payload
+            # Use GDB variable objects — better type resolution than raw eval.
+            # Handles optimized/template/static variables that raw
+            # -data-evaluate-expression chokes on with "cast to declared type".
+            var_result = session.bridge.command(f'-var-create - * "{escaped}"')
+
+            if var_result.is_error:
+                # Fallback: try raw evaluation (works for simple literals)
+                raw = session.bridge.command(
+                    f'-data-evaluate-expression "{escaped}"'
+                )
+                if not raw.is_error:
+                    payload = raw.payload
+                    if isinstance(payload, dict):
+                        return {
+                            "name": name,
+                            "expression": expression,
+                            "value": payload.get("value", "?"),
+                        }
+                return {"error": var_result.error_msg}
+
+            payload = var_result.payload
             if not isinstance(payload, dict):
-                return {"error": "Unexpected response from expression evaluation"}
+                return {"error": "Unexpected response from variable object creation"}
 
-            return {
+            var_name = payload.get("name", "")
+            value = payload.get("value", "?")
+            type_str = payload.get("type", "?")
+            num_children = int(payload.get("numchild", "0"))
+
+            result_dict: dict = {
                 "name": name,
                 "expression": expression,
-                "value": payload.get("value", "?"),
+                "value": value,
+                "type": type_str,
             }
+
+            # For structs/classes, expand one level (up to 32 children)
+            if num_children > 0 and num_children <= 32:
+                children_result = session.bridge.command(
+                    f"-var-list-children --all-values {var_name}"
+                )
+                if not children_result.is_error:
+                    cpayload = children_result.payload
+                    if isinstance(cpayload, dict):
+                        children = []
+                        for child in cpayload.get("children", []):
+                            c = child.get("child", child) if isinstance(child, dict) else child
+                            if isinstance(c, dict):
+                                children.append({
+                                    "name": c.get("exp", "?"),
+                                    "value": c.get("value", "?"),
+                                    "type": c.get("type", "?"),
+                                })
+                        if children:
+                            result_dict["fields"] = children
+
+            # Clean up temporary variable object
+            session.bridge.command(f"-var-delete {var_name}")
+            return result_dict
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}
 

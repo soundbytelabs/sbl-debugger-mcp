@@ -31,17 +31,34 @@ def _add_source(result: dict, stop: StopEvent | None) -> None:
 
 
 def _resync_gdb(session: DebugSession) -> bool:
-    """Attempt to resynchronize GDB after an OpenOCD-level halt.
+    """Resynchronize GDB after an OpenOCD-level halt.
 
-    Pokes GDB with -exec-interrupt (no-op if target already halted,
-    but forces GDB to re-query target state via SWD), then verifies
-    GDB is responsive with -thread-info.
+    Uses 'monitor halt' through GDB so GDB sees the halt and updates
+    its internal state. Unlike TCL halt (which bypasses GDB entirely)
+    or -exec-interrupt (which is a no-op if GDB doesn't think the
+    target is running), 'monitor halt' goes GDB -> OpenOCD -> SWD
+    and GDB processes the response.
+
+    Then verifies via -thread-info that GDB agrees the target is stopped.
     """
     try:
-        session.bridge.command("-exec-interrupt", timeout=2.0)
+        # Tell GDB to ask OpenOCD to halt — GDB processes the response
+        # and learns the target is stopped, unlike TCL which bypasses GDB.
+        session.bridge.monitor("halt", timeout=3.0)
+        time.sleep(0.05)  # Let GDB process async events
         session.bridge.drain_events()
+
+        # Verify GDB now agrees the target is stopped
         result = session.bridge.command("-thread-info", timeout=2.0)
-        return not result.is_error
+        if result.is_error:
+            return False
+        payload = result.payload
+        if isinstance(payload, dict):
+            threads = payload.get("threads", [])
+            for t in threads:
+                if t.get("state") == "stopped":
+                    return True
+        return False
     except Exception:
         return False
 
@@ -187,9 +204,44 @@ def register_tools(mcp, manager: SessionManager) -> None:
             session = manager.get(name)
             result = session.bridge.command("-exec-continue")
             if result.is_error:
-                return {"error": result.error_msg}
-            session.target_state.set_running()
-            return {"name": name, "state": "running"}
+                # GDB refused to continue — try resync + retry
+                if _resync_gdb(session):
+                    result = session.bridge.command("-exec-continue")
+                    if result.is_error:
+                        return {"error": result.error_msg}
+                else:
+                    return {"error": result.error_msg}
+
+            # Brief check that target actually resumed
+            time.sleep(0.05)
+            events = session.bridge.drain_events()
+            running = any(
+                e.get("message") == "running" for e in events
+            )
+
+            if not running:
+                # Check thread state directly
+                try:
+                    ti = session.bridge.command("-thread-info", timeout=1.0)
+                    if not ti.is_error and isinstance(ti.payload, dict):
+                        threads = ti.payload.get("threads", [])
+                        running = any(
+                            t.get("state") == "running" for t in threads
+                        )
+                except Exception:
+                    pass
+
+            if running:
+                session.target_state.set_running()
+                return {"name": name, "state": "running"}
+
+            # Target didn't resume — report honestly
+            session.target_state.set_halted()
+            return {
+                "name": name,
+                "state": "halted",
+                "warning": "Target did not resume after continue. May need resync.",
+            }
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}
 

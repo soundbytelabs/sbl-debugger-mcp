@@ -12,7 +12,7 @@ from sbl_debugger.bridge.types import MiResult, StopEvent, FrameInfo
 from sbl_debugger.process.openocd import OpenOcdProcess
 from sbl_debugger.session.manager import SessionManager
 from sbl_debugger.tools import execution as execution_tools
-from sbl_debugger.tools.execution import _stop_from_result
+from sbl_debugger.tools.execution import _resync_gdb, _stop_from_result
 from sbl_debugger.targets import get_profile
 
 
@@ -308,6 +308,72 @@ class TestHalt:
         assert "warning" in result
 
 
+# -- Resync --
+
+class TestResyncGdb:
+    def test_resync_uses_monitor_halt(self):
+        """_resync_gdb calls bridge.monitor('halt') and checks thread state."""
+        _, mgr, _ = _setup_tools()
+        session = _mock_attach(mgr)
+
+        thread_info_result = MiResult(
+            message="done",
+            payload={"threads": [{"id": "1", "state": "stopped"}]},
+        )
+
+        with patch.object(
+            MiBridge, "monitor",
+            return_value=MiResult(message="done"),
+        ) as mock_mon, patch.object(
+            MiBridge, "drain_events",
+            return_value=[],
+        ), patch.object(
+            MiBridge, "command",
+            return_value=thread_info_result,
+        ):
+            result = _resync_gdb(session)
+
+        assert result is True
+        mock_mon.assert_called_once_with("halt", timeout=3.0)
+
+    def test_resync_returns_false_when_thread_not_stopped(self):
+        """_resync_gdb returns False if no thread reports stopped."""
+        _, mgr, _ = _setup_tools()
+        session = _mock_attach(mgr)
+
+        thread_info_result = MiResult(
+            message="done",
+            payload={"threads": [{"id": "1", "state": "running"}]},
+        )
+
+        with patch.object(
+            MiBridge, "monitor",
+            return_value=MiResult(message="done"),
+        ), patch.object(
+            MiBridge, "drain_events",
+            return_value=[],
+        ), patch.object(
+            MiBridge, "command",
+            return_value=thread_info_result,
+        ):
+            result = _resync_gdb(session)
+
+        assert result is False
+
+    def test_resync_returns_false_on_exception(self):
+        """_resync_gdb returns False if monitor raises."""
+        _, mgr, _ = _setup_tools()
+        session = _mock_attach(mgr)
+
+        with patch.object(
+            MiBridge, "monitor",
+            side_effect=RuntimeError("GDB not responding"),
+        ):
+            result = _resync_gdb(session)
+
+        assert result is False
+
+
 # -- Continue --
 
 class TestContinueExecution:
@@ -315,9 +381,14 @@ class TestContinueExecution:
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
+        running_events = [{"type": "notify", "message": "running", "payload": {"thread-id": "all"}}]
+
         with patch.object(
             MiBridge, "command",
             return_value=MiResult(message="running"),
+        ), patch.object(
+            MiBridge, "drain_events",
+            return_value=running_events,
         ):
             result = tools["continue_execution"].fn(name="daisy")
 
@@ -331,10 +402,83 @@ class TestContinueExecution:
         with patch.object(
             MiBridge, "command",
             return_value=MiResult(message="error", payload={"msg": "The program is not being run."}),
+        ), patch.object(
+            MiBridge, "monitor",
+            side_effect=RuntimeError("GDB not responding"),
         ):
             result = tools["continue_execution"].fn(name="daisy")
 
         assert "error" in result
+
+    def test_continue_retries_after_gdb_error(self):
+        """First -exec-continue fails, resync succeeds, retry works."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        error_result = MiResult(message="error", payload={"msg": "The program is not being run."})
+        running_result = MiResult(message="running")
+        thread_info_stopped = MiResult(
+            message="done",
+            payload={"threads": [{"id": "1", "state": "stopped"}]},
+        )
+        running_events = [{"type": "notify", "message": "running", "payload": {"thread-id": "all"}}]
+
+        call_count = [0]
+        def mock_command(cmd, timeout=5.0):
+            call_count[0] += 1
+            if cmd == "-exec-continue":
+                # First continue fails, second succeeds
+                if call_count[0] <= 1:
+                    return error_result
+                return running_result
+            if cmd == "-thread-info":
+                return thread_info_stopped
+            return MiResult(message="done")
+
+        with patch.object(
+            MiBridge, "command",
+            side_effect=mock_command,
+        ), patch.object(
+            MiBridge, "monitor",
+            return_value=MiResult(message="done"),
+        ), patch.object(
+            MiBridge, "drain_events",
+            return_value=running_events,
+        ):
+            result = tools["continue_execution"].fn(name="daisy")
+
+        assert result["state"] == "running"
+
+    def test_continue_reports_halted_if_target_didnt_resume(self):
+        """Continue succeeds at GDB level but thread-info shows stopped."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        thread_info_stopped = MiResult(
+            message="done",
+            payload={"threads": [{"id": "1", "state": "stopped"}]},
+        )
+
+        call_count = [0]
+        def mock_command(cmd, timeout=5.0):
+            call_count[0] += 1
+            if cmd == "-exec-continue":
+                return MiResult(message="running")
+            if cmd == "-thread-info":
+                return thread_info_stopped
+            return MiResult(message="done")
+
+        with patch.object(
+            MiBridge, "command",
+            side_effect=mock_command,
+        ), patch.object(
+            MiBridge, "drain_events",
+            return_value=[],  # No running event
+        ):
+            result = tools["continue_execution"].fn(name="daisy")
+
+        assert result["state"] == "halted"
+        assert "warning" in result
 
 
 # -- Wait for halt --

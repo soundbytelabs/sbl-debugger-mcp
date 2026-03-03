@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from sbl_debugger.bridge.types import StopEvent
 from sbl_debugger.session.manager import SessionManager
 from sbl_debugger.tools.execution import _resync_gdb
 
@@ -62,11 +63,23 @@ def register_tools(mcp, manager: SessionManager) -> None:
             time.sleep(0.1)  # Let OpenOCD settle after reset
 
             # Force GDB to re-query target state
-            _resync_gdb(session)
+            resynced = _resync_gdb(session)
             session.target_state.set_halted()
 
-            session.bridge.drain_events()
+            events = session.bridge.drain_events()
+            for e in events:
+                if e.get("message") == "stopped":
+                    payload = e.get("payload", {})
+                    if isinstance(payload, dict):
+                        stop = StopEvent.from_mi(payload)
+                        session.target_state.set_halted(stop)
+
             stats["state"] = "halted"
+            if not resynced:
+                stats["warning"] = (
+                    "GDB may be desynchronized after flash. "
+                    "First continue may fail."
+                )
 
             return stats
         except (ValueError, RuntimeError) as e:

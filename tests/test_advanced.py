@@ -55,6 +55,25 @@ class TestLoadErrors:
 
 
 class TestLoad:
+    def _load_patches(self, dl_payload=None):
+        """Common patches for load tests: symbols, download, monitor, reconnect."""
+        if dl_payload is None:
+            dl_payload = {}
+
+        def mock_cmd(cmd, timeout=5.0):
+            if "-target-download" in cmd:
+                return MiResult(message="done", payload=dl_payload)
+            return MiResult(message="done")
+
+        return (
+            patch.object(MiBridge, "load_symbols", return_value=MiResult(message="done")),
+            patch.object(MiBridge, "command", side_effect=mock_cmd),
+            patch.object(MiBridge, "monitor", return_value=MiResult(message="done")),
+            patch.object(MiBridge, "disconnect", return_value=MiResult(message="done")),
+            patch.object(MiBridge, "connect", return_value=MiResult(message="connected")),
+            patch.object(MiBridge, "drain_events", return_value=[]),
+        )
+
     def test_load_with_explicit_elf(self):
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
@@ -65,33 +84,22 @@ class TestLoad:
             "write-rate": "2048",
         }
 
-        def mock_cmd(cmd, timeout=5.0):
-            if "-target-download" in cmd:
-                return MiResult(message="done", payload=dl_payload)
-            return MiResult(message="done")
-
-        with patch.object(MiBridge, "load_symbols", return_value=MiResult(message="done")), \
-             patch.object(MiBridge, "command", side_effect=mock_cmd), \
-             patch.object(MiBridge, "monitor", return_value=MiResult(message="done")), \
-             patch.object(MiBridge, "drain_events", return_value=[]):
+        patches = self._load_patches(dl_payload)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             result = tools["load"].fn(name="daisy", elf="/path/to/firmware.elf")
 
         assert result["status"] == "flashed"
         assert result["elf"] == "/path/to/firmware.elf"
         assert result["total_bytes"] == 8192
         assert result["state"] == "halted"
+        assert result["gdb_reconnected"] is True
 
     def test_load_uses_session_elf(self):
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr, elf_path="/session/firmware.elf")
 
-        def mock_cmd(cmd, timeout=5.0):
-            return MiResult(message="done", payload={})
-
-        with patch.object(MiBridge, "load_symbols", return_value=MiResult(message="done")), \
-             patch.object(MiBridge, "command", side_effect=mock_cmd), \
-             patch.object(MiBridge, "monitor", return_value=MiResult(message="done")), \
-             patch.object(MiBridge, "drain_events", return_value=[]):
+        patches = self._load_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             result = tools["load"].fn(name="daisy")
 
         assert result["status"] == "flashed"
@@ -128,16 +136,61 @@ class TestLoad:
         _, mgr, tools = _setup_tools()
         session = _mock_attach(mgr, elf_path="/old/firmware.elf")
 
+        patches = self._load_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            tools["load"].fn(name="daisy", elf="/new/firmware.elf")
+
+        assert session.elf_path == "/new/firmware.elf"
+
+    def test_load_reconnects_gdb_after_flash(self):
+        """After flash, GDB is disconnected and reconnected to reset state."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        dl_payload = {"total-size": "4096"}
+
         def mock_cmd(cmd, timeout=5.0):
-            return MiResult(message="done", payload={})
+            if "-target-download" in cmd:
+                return MiResult(message="done", payload=dl_payload)
+            return MiResult(message="done")
+
+        with patch.object(MiBridge, "load_symbols", return_value=MiResult(message="done")) as mock_sym, \
+             patch.object(MiBridge, "command", side_effect=mock_cmd), \
+             patch.object(MiBridge, "monitor", return_value=MiResult(message="done")), \
+             patch.object(MiBridge, "disconnect", return_value=MiResult(message="done")) as mock_disc, \
+             patch.object(MiBridge, "connect", return_value=MiResult(message="connected")) as mock_conn, \
+             patch.object(MiBridge, "drain_events", return_value=[]):
+            result = tools["load"].fn(name="daisy", elf="/path/firmware.elf")
+
+        # Verify disconnect + reconnect happened
+        mock_disc.assert_called_once()
+        mock_conn.assert_called_once()
+        # Symbols re-loaded after reconnect (called twice: initial + post-reconnect)
+        assert mock_sym.call_count == 2
+        assert result["gdb_reconnected"] is True
+        assert "warning" not in result
+
+    def test_load_warns_on_reconnect_failure(self):
+        """When reconnect fails, load still succeeds but with warning."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        def mock_cmd(cmd, timeout=5.0):
+            if "-target-download" in cmd:
+                return MiResult(message="done", payload={})
+            return MiResult(message="done")
 
         with patch.object(MiBridge, "load_symbols", return_value=MiResult(message="done")), \
              patch.object(MiBridge, "command", side_effect=mock_cmd), \
              patch.object(MiBridge, "monitor", return_value=MiResult(message="done")), \
+             patch.object(MiBridge, "disconnect", return_value=MiResult(message="done")), \
+             patch.object(MiBridge, "connect", return_value=MiResult(message="error", payload={"msg": "refused"})), \
              patch.object(MiBridge, "drain_events", return_value=[]):
-            tools["load"].fn(name="daisy", elf="/new/firmware.elf")
+            result = tools["load"].fn(name="daisy", elf="/path/firmware.elf")
 
-        assert session.elf_path == "/new/firmware.elf"
+        assert result["status"] == "flashed"
+        assert result["gdb_reconnected"] is False
+        assert "warning" in result
 
 
 # -- Monitor tool --

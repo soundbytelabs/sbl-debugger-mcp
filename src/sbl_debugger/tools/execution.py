@@ -6,7 +6,7 @@ import time
 
 from pygdbmi.constants import GdbTimeoutError
 
-from sbl_debugger.bridge.types import MiResult, StopEvent
+from sbl_debugger.bridge.types import FrameInfo, MiResult, StopEvent
 from sbl_debugger.session.manager import SessionManager
 from sbl_debugger.session.session import DebugSession
 from sbl_debugger.tools.inspection import read_source_context
@@ -39,28 +39,48 @@ def _resync_gdb(session: DebugSession) -> bool:
     target is running), 'monitor halt' goes GDB -> OpenOCD -> SWD
     and GDB processes the response.
 
-    Then verifies via -thread-info that GDB agrees the target is stopped.
+    Polls with increasing delays (50, 100, 200, 300, 400ms — ~1.5s total)
+    to give GDB time to process async events.
     """
     try:
-        # Tell GDB to ask OpenOCD to halt — GDB processes the response
-        # and learns the target is stopped, unlike TCL which bypasses GDB.
         session.bridge.monitor("halt", timeout=3.0)
-        time.sleep(0.05)  # Let GDB process async events
-        session.bridge.drain_events()
-
-        # Verify GDB now agrees the target is stopped
-        result = session.bridge.command("-thread-info", timeout=2.0)
-        if result.is_error:
-            return False
-        payload = result.payload
-        if isinstance(payload, dict):
-            threads = payload.get("threads", [])
-            for t in threads:
-                if t.get("state") == "stopped":
-                    return True
-        return False
     except Exception:
         return False
+
+    # Poll with increasing delays: 50, 100, 200, 300, 400ms (~1.5s total)
+    for attempt in range(5):
+        time.sleep(0.05 * (attempt + 1))
+        try:
+            session.bridge.drain_events()
+            result = session.bridge.command("-thread-info", timeout=2.0)
+            if result.is_error:
+                continue
+            payload = result.payload
+            if isinstance(payload, dict):
+                threads = payload.get("threads", [])
+                for t in threads:
+                    if t.get("state") == "stopped":
+                        return True
+        except Exception:
+            continue
+    return False
+
+
+def _query_current_frame(session: DebugSession) -> StopEvent | None:
+    """Query GDB for current frame when no async stop event available."""
+    try:
+        result = session.bridge.command("-stack-info-frame", timeout=2.0)
+        if result.is_error:
+            return None
+        payload = result.payload
+        if isinstance(payload, dict):
+            frame_data = payload.get("frame", {})
+            if frame_data:
+                frame = FrameInfo.from_mi(frame_data)
+                return StopEvent(reason="signal-received", frame=frame)
+    except Exception:
+        pass
+    return None
 
 
 def _step_command(
@@ -166,10 +186,13 @@ def register_tools(mcp, manager: SessionManager) -> None:
             session.target_state.set_halted()
 
             # Try to resync GDB so subsequent commands work
-            _resync_gdb(session)
+            resynced = _resync_gdb(session)
 
-            # Check if GDB now reports the stop
-            stop = session.bridge.wait_for_stop(timeout=1.0)
+            # Try to get frame info
+            stop = session.bridge.wait_for_stop(timeout=0.5)
+            if stop is None and resynced:
+                stop = _query_current_frame(session)
+
             if stop is not None:
                 session.target_state.set_halted(stop)
                 response = {
@@ -202,6 +225,11 @@ def register_tools(mcp, manager: SessionManager) -> None:
         """
         try:
             session = manager.get(name)
+
+            # If halted via TCL (no last_stop), resync GDB first
+            if session.target_state.is_halted and session.target_state.last_stop is None:
+                _resync_gdb(session)
+
             result = session.bridge.command("-exec-continue")
             if result.is_error:
                 # GDB refused to continue — try resync + retry
@@ -212,15 +240,24 @@ def register_tools(mcp, manager: SessionManager) -> None:
                 else:
                     return {"error": result.error_msg}
 
-            # Brief check that target actually resumed
-            time.sleep(0.05)
-            events = session.bridge.drain_events()
-            running = any(
-                e.get("message") == "running" for e in events
+            # Check if target resumed:
+            # 1. GDB returns ^running as the result message
+            # 2. *running notify event in the same response batch
+            # 3. Drain any additional events after a brief delay
+            running = result.message == "running" or any(
+                e.get("message") == "running" for e in result.events
             )
 
             if not running:
-                # Check thread state directly
+                # Events might arrive slightly after the result
+                time.sleep(0.05)
+                events = session.bridge.drain_events()
+                running = any(
+                    e.get("message") == "running" for e in events
+                )
+
+            if not running:
+                # Last resort: check thread state directly
                 try:
                     ti = session.bridge.command("-thread-info", timeout=1.0)
                     if not ti.is_error and isinstance(ti.payload, dict):

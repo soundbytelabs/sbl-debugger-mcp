@@ -272,6 +272,104 @@ class TestSnapshotHalted:
         assert "locals" not in result
 
 
+class TestSnapshotTclFallback:
+    def test_snapshot_falls_back_to_tcl_registers(self):
+        """When GDB returns all-zero registers, falls back to OpenOCD TCL."""
+        _, mgr, tools = _setup_tools()
+        session = _mock_attach(mgr)
+
+        # Set halted state
+        stop = StopEvent(
+            reason="signal-received",
+            frame=FrameInfo(func="main", line=10, address="0x08000100"),
+        )
+        session.target_state.set_halted(stop)
+
+        # GDB returns all-zero registers (desynced)
+        zero_names = {"register-names": ["r0", "r1", "sp", "lr", "pc", "xpsr"]}
+        zero_values = {"register-values": [
+            {"number": "0", "value": "0x00000000"},
+            {"number": "1", "value": "0x00000000"},
+            {"number": "2", "value": "0x00000000"},
+            {"number": "3", "value": "0x00000000"},
+            {"number": "4", "value": "0x00000000"},
+            {"number": "5", "value": "0x00000000"},
+        ]}
+        bt = {"stack": []}
+
+        def mock_cmd(cmd, timeout=5.0):
+            if "register-names" in cmd:
+                return MiResult(message="done", payload=zero_names)
+            elif "register-values" in cmd:
+                return MiResult(message="done", payload=zero_values)
+            elif "-stack-list-frames" in cmd:
+                return MiResult(message="done", payload=bt)
+            elif "-stack-list-variables" in cmd:
+                return MiResult(message="done", payload={"variables": []})
+            return MiResult(message="done")
+
+        # TCL returns real register values
+        tcl_regs = {
+            "r0": "0x20000100",
+            "r1": "0x00000042",
+            "sp": "0x20020000",
+            "lr": "0x08000151",
+            "pc": "0x08000300",
+            "xpsr": "0x61000000",
+            "msp": "0x20020000",  # Not a core register — should be filtered
+        }
+
+        with patch.object(MiBridge, "drain_events", return_value=[]), \
+             patch.object(MiBridge, "command", side_effect=mock_cmd), \
+             patch.object(OpenOcdProcess, "read_registers_tcl", return_value=tcl_regs):
+            result = tools["debug_snapshot"].fn(name="daisy")
+
+        assert result["state"] == "halted"
+        assert "registers" in result
+        assert result["registers"]["pc"] == "0x08000300"
+        assert result["registers"]["sp"] == "0x20020000"
+        # Non-core registers should be filtered out
+        assert "msp" not in result["registers"]
+
+    def test_snapshot_no_fallback_when_registers_nonzero(self):
+        """When GDB returns non-zero registers, no TCL fallback needed."""
+        _, mgr, tools = _setup_tools()
+        session = _mock_attach(mgr)
+
+        stop = StopEvent(
+            reason="signal-received",
+            frame=FrameInfo(func="main", line=10, address="0x08000100"),
+        )
+        session.target_state.set_halted(stop)
+
+        names = {"register-names": ["r0", "pc"]}
+        values = {"register-values": [
+            {"number": "0", "value": "0x20000100"},
+            {"number": "1", "value": "0x08000150"},
+        ]}
+
+        def mock_cmd(cmd, timeout=5.0):
+            if "register-names" in cmd:
+                return MiResult(message="done", payload=names)
+            elif "register-values" in cmd:
+                return MiResult(message="done", payload=values)
+            elif "-stack-list-frames" in cmd:
+                return MiResult(message="done", payload={"stack": []})
+            elif "-stack-list-variables" in cmd:
+                return MiResult(message="done", payload={"variables": []})
+            return MiResult(message="done")
+
+        with patch.object(MiBridge, "drain_events", return_value=[]), \
+             patch.object(MiBridge, "command", side_effect=mock_cmd), \
+             patch.object(OpenOcdProcess, "read_registers_tcl") as mock_tcl:
+            result = tools["debug_snapshot"].fn(name="daisy")
+
+        assert result["state"] == "halted"
+        assert result["registers"]["r0"] == "0x20000100"
+        # TCL should NOT have been called
+        mock_tcl.assert_not_called()
+
+
 class TestSnapshotToolRegistration:
     def test_tool_registered(self):
         _, _, tools = _setup_tools()

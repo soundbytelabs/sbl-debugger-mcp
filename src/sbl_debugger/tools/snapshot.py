@@ -107,35 +107,34 @@ def register_tools(mcp, manager: SessionManager) -> None:
             return {"error": str(e)}
 
 
-def _read_core_registers(session, result: dict) -> None:
-    """Read core registers and add to result dict."""
+def _read_core_registers_gdb(session) -> dict[str, str] | None:
+    """Read core registers via GDB. Returns dict or None on failure."""
     try:
         names_result = session.bridge.command("-data-list-register-names")
         if names_result.is_error:
-            return
+            return None
 
         payload = names_result.payload
         if not isinstance(payload, dict):
-            return
+            return None
         all_names = payload.get("register-names", [])
         named = {i: n for i, n in enumerate(all_names) if n}
 
-        # Filter to core registers only
         core_set = set(CORE_REGISTERS)
         indices = [i for i, n in named.items() if n in core_set]
         if not indices:
-            return
+            return None
 
         idx_str = " ".join(str(i) for i in indices)
         values_result = session.bridge.command(
             f"-data-list-register-values x {idx_str}"
         )
         if values_result.is_error:
-            return
+            return None
 
         vpayload = values_result.payload
         if not isinstance(vpayload, dict):
-            return
+            return None
 
         reg_values = {}
         for entry in vpayload.get("register-values", []):
@@ -143,9 +142,33 @@ def _read_core_registers(session, result: dict) -> None:
             reg_name = named.get(num, f"reg{num}")
             reg_values[reg_name] = entry["value"]
 
-        result["registers"] = reg_values
+        return reg_values if reg_values else None
     except Exception:
-        pass  # Non-fatal — snapshot still useful without registers
+        return None
+
+
+def _all_registers_zero(regs: dict[str, str]) -> bool:
+    """Detect desynced GDB: all core registers read as 0x0."""
+    zero_values = {"0x0", "0x00000000", "0x0000000000000000"}
+    return all(v in zero_values for v in regs.values())
+
+
+def _read_core_registers(session, result: dict) -> None:
+    """Read core registers, falling back to OpenOCD TCL if GDB is desynced."""
+    regs = _read_core_registers_gdb(session)
+
+    # Detect desynced GDB: all core registers are 0x0
+    if regs and _all_registers_zero(regs):
+        tcl_regs = session.openocd.read_registers_tcl()
+        if tcl_regs:
+            # Filter to core registers only
+            core_set = set(CORE_REGISTERS)
+            filtered = {k: v for k, v in tcl_regs.items() if k in core_set}
+            if filtered:
+                regs = filtered
+
+    if regs:
+        result["registers"] = regs
 
 
 def _read_backtrace(session, result: dict) -> None:

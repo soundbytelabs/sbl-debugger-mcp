@@ -12,7 +12,7 @@ from sbl_debugger.bridge.types import MiResult, StopEvent, FrameInfo
 from sbl_debugger.process.openocd import OpenOcdProcess
 from sbl_debugger.session.manager import SessionManager
 from sbl_debugger.tools import execution as execution_tools
-from sbl_debugger.tools.execution import _resync_gdb, _stop_from_result
+from sbl_debugger.tools.execution import _resync_gdb, _query_current_frame, _stop_from_result
 from sbl_debugger.targets import get_profile
 
 
@@ -290,6 +290,55 @@ class TestHalt:
         assert result["method"] == "openocd_tcl"
         assert result["frame"]["func"] == "audio_callback"
 
+    def test_halt_tcl_resync_captures_frame(self):
+        """After TCL halt + successful resync, frame info populated via _query_current_frame."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        frame_result = MiResult(
+            message="done",
+            payload={"frame": {"func": "audio_callback", "line": "50", "addr": "0x08000300"}},
+        )
+        thread_info_stopped = MiResult(
+            message="done",
+            payload={"threads": [{"id": "1", "state": "stopped"}]},
+        )
+
+        call_count = [0]
+        def mock_command(cmd, timeout=5.0):
+            call_count[0] += 1
+            if cmd == "-exec-interrupt":
+                return MiResult(message="done")
+            if cmd == "-thread-info":
+                return thread_info_stopped
+            if cmd == "-stack-info-frame":
+                return frame_result
+            return MiResult(message="done")
+
+        with patch.object(
+            MiBridge, "command",
+            side_effect=mock_command,
+        ), patch.object(
+            MiBridge, "wait_for_stop",
+            return_value=None,  # GDB never produces a stop event
+        ), patch.object(
+            OpenOcdProcess, "tcl_command",
+            return_value="",
+        ), patch.object(
+            MiBridge, "monitor",
+            return_value=MiResult(message="done"),
+        ), patch.object(
+            MiBridge, "drain_events",
+            return_value=[],
+        ):
+            result = tools["halt"].fn(name="daisy")
+
+        assert result["state"] == "halted"
+        assert result["method"] == "openocd_tcl"
+        assert result["frame"]["func"] == "audio_callback"
+        assert result["frame"]["line"] == 50
+        assert "warning" not in result
+
     def test_halt_gdb_timeout_tcl_also_fails(self):
         """When both GDB timeout and TCL fail, return unknown state."""
         _, mgr, tools = _setup_tools()
@@ -337,7 +386,7 @@ class TestResyncGdb:
         mock_mon.assert_called_once_with("halt", timeout=3.0)
 
     def test_resync_returns_false_when_thread_not_stopped(self):
-        """_resync_gdb returns False if no thread reports stopped."""
+        """_resync_gdb returns False after all 5 attempts if thread stays running."""
         _, mgr, _ = _setup_tools()
         session = _mock_attach(mgr)
 
@@ -355,10 +404,12 @@ class TestResyncGdb:
         ), patch.object(
             MiBridge, "command",
             return_value=thread_info_result,
-        ):
+        ) as mock_cmd:
             result = _resync_gdb(session)
 
         assert result is False
+        # Should have tried 5 times (retry loop)
+        assert mock_cmd.call_count == 5
 
     def test_resync_returns_false_on_exception(self):
         """_resync_gdb returns False if monitor raises."""
@@ -372,6 +423,84 @@ class TestResyncGdb:
             result = _resync_gdb(session)
 
         assert result is False
+
+    def test_resync_succeeds_on_third_attempt(self):
+        """Thread-info returns running twice, then stopped on third attempt."""
+        _, mgr, _ = _setup_tools()
+        session = _mock_attach(mgr)
+
+        running_result = MiResult(
+            message="done",
+            payload={"threads": [{"id": "1", "state": "running"}]},
+        )
+        stopped_result = MiResult(
+            message="done",
+            payload={"threads": [{"id": "1", "state": "stopped"}]},
+        )
+
+        call_count = [0]
+        def mock_command(cmd, timeout=5.0):
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                return running_result
+            return stopped_result
+
+        with patch.object(
+            MiBridge, "monitor",
+            return_value=MiResult(message="done"),
+        ), patch.object(
+            MiBridge, "drain_events",
+            return_value=[],
+        ), patch.object(
+            MiBridge, "command",
+            side_effect=mock_command,
+        ):
+            result = _resync_gdb(session)
+
+        assert result is True
+        assert call_count[0] == 3
+
+
+class TestQueryCurrentFrame:
+    def test_returns_stop_event_with_frame(self):
+        _, mgr, _ = _setup_tools()
+        session = _mock_attach(mgr)
+
+        frame_result = MiResult(
+            message="done",
+            payload={"frame": {"func": "main", "line": "42", "addr": "0x08000150"}},
+        )
+        with patch.object(MiBridge, "command", return_value=frame_result):
+            stop = _query_current_frame(session)
+
+        assert stop is not None
+        assert stop.reason == "signal-received"
+        assert stop.frame.func == "main"
+        assert stop.frame.line == 42
+
+    def test_returns_none_on_error(self):
+        _, mgr, _ = _setup_tools()
+        session = _mock_attach(mgr)
+
+        with patch.object(
+            MiBridge, "command",
+            return_value=MiResult(message="error", payload={"msg": "No frame"}),
+        ):
+            stop = _query_current_frame(session)
+
+        assert stop is None
+
+    def test_returns_none_on_exception(self):
+        _, mgr, _ = _setup_tools()
+        session = _mock_attach(mgr)
+
+        with patch.object(
+            MiBridge, "command",
+            side_effect=RuntimeError("GDB hung"),
+        ):
+            stop = _query_current_frame(session)
+
+        assert stop is None
 
 
 # -- Continue --
@@ -449,8 +578,63 @@ class TestContinueExecution:
 
         assert result["state"] == "running"
 
+    def test_continue_presyncs_after_tcl_halt(self):
+        """Continue auto-resyncs when last_stop is None (TCL halt path)."""
+        _, mgr, tools = _setup_tools()
+        session = _mock_attach(mgr)
+
+        # Simulate TCL halt: halted but no last_stop
+        session.target_state.set_halted()  # No stop event
+
+        running_events = [{"type": "notify", "message": "running", "payload": {"thread-id": "all"}}]
+        thread_info_stopped = MiResult(
+            message="done",
+            payload={"threads": [{"id": "1", "state": "stopped"}]},
+        )
+
+        call_count = [0]
+        def mock_command(cmd, timeout=5.0):
+            call_count[0] += 1
+            if cmd == "-exec-continue":
+                return MiResult(message="running")
+            if cmd == "-thread-info":
+                return thread_info_stopped
+            return MiResult(message="done")
+
+        with patch.object(
+            MiBridge, "command",
+            side_effect=mock_command,
+        ), patch.object(
+            MiBridge, "monitor",
+            return_value=MiResult(message="done"),
+        ) as mock_mon, patch.object(
+            MiBridge, "drain_events",
+            return_value=running_events,
+        ):
+            result = tools["continue_execution"].fn(name="daisy")
+
+        assert result["state"] == "running"
+        # Verify monitor("halt") was called for resync before continue
+        mock_mon.assert_called_with("halt", timeout=3.0)
+
+    def test_continue_detects_running_from_result_message(self):
+        """When GDB returns ^running, trust it — target is running."""
+        _, mgr, tools = _setup_tools()
+        _mock_attach(mgr)
+
+        with patch.object(
+            MiBridge, "command",
+            return_value=MiResult(message="running"),
+        ), patch.object(
+            MiBridge, "drain_events",
+            return_value=[],  # No additional events needed
+        ):
+            result = tools["continue_execution"].fn(name="daisy")
+
+        assert result["state"] == "running"
+
     def test_continue_reports_halted_if_target_didnt_resume(self):
-        """Continue succeeds at GDB level but thread-info shows stopped."""
+        """Continue returns ^done (not ^running) and no running events."""
         _, mgr, tools = _setup_tools()
         _mock_attach(mgr)
 
@@ -463,7 +647,8 @@ class TestContinueExecution:
         def mock_command(cmd, timeout=5.0):
             call_count[0] += 1
             if cmd == "-exec-continue":
-                return MiResult(message="running")
+                # GDB accepts but returns ^done instead of ^running
+                return MiResult(message="done")
             if cmd == "-thread-info":
                 return thread_info_stopped
             return MiResult(message="done")

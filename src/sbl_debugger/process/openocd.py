@@ -158,6 +158,36 @@ class OpenOcdProcess:
         except (OSError, socket.timeout) as e:
             raise RuntimeError(f"TCL command '{cmd}' failed: {e}")
 
+    def read_registers_tcl(self, timeout: float = 3.0) -> dict[str, str] | None:
+        """Read ARM core registers via OpenOCD TCL port.
+
+        Parses OpenOCD 'reg' output format:
+          (0) r0 (/32): 0x00000000
+          (1) r1 (/32): 0x00000001
+
+        Returns dict of {name: hex_value} or None on failure.
+        """
+        import re
+
+        try:
+            output = self.tcl_command("reg", timeout=timeout)
+        except RuntimeError:
+            return None
+
+        if not output:
+            return None
+
+        regs: dict[str, str] = {}
+        # Match lines like: (0) r0 (/32): 0x00000000
+        pattern = re.compile(r"\(\d+\)\s+(\w+)\s+\(/\d+\):\s+(0x[0-9a-fA-F]+)")
+        for line in output.splitlines():
+            m = pattern.match(line.strip())
+            if m:
+                name, value = m.group(1), m.group(2)
+                regs[name] = value
+
+        return regs if regs else None
+
     def _read_stderr(self) -> None:
         """Read OpenOCD stderr, detect readiness."""
         assert self._proc is not None

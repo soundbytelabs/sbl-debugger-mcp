@@ -167,3 +167,49 @@ class TestOpenOcdProcess:
         ocd = OpenOcdProcess("stlink.cfg", "stm32h7x.cfg")
         with pytest.raises(RuntimeError, match="not running"):
             ocd.tcl_command("halt")
+
+    @patch("sbl_debugger.process.openocd.shutil.which", return_value="/usr/bin/openocd")
+    @patch("sbl_debugger.process.openocd.subprocess.Popen")
+    def test_read_registers_tcl(self, mock_popen_cls, mock_which):
+        """read_registers_tcl parses OpenOCD register output format."""
+        mock_proc = _make_mock_popen()
+        mock_popen_cls.return_value = mock_proc
+
+        ocd = OpenOcdProcess("stlink.cfg", "stm32h7x.cfg")
+        ocd.start(timeout=2.0)
+
+        tcl_output = (
+            "(0) r0 (/32): 0x20000100\n"
+            "(1) r1 (/32): 0x00000042\n"
+            "(2) r2 (/32): 0x00000000\n"
+            "(13) sp (/32): 0x20020000\n"
+            "(14) lr (/32): 0x08000151\n"
+            "(15) pc (/32): 0x08000300\n"
+            "(16) xpsr (/32): 0x61000000\n"
+        )
+
+        with patch.object(ocd, "tcl_command", return_value=tcl_output):
+            regs = ocd.read_registers_tcl()
+
+        assert regs is not None
+        assert regs["r0"] == "0x20000100"
+        assert regs["pc"] == "0x08000300"
+        assert regs["sp"] == "0x20020000"
+        assert regs["xpsr"] == "0x61000000"
+        ocd.stop()
+
+    @patch("sbl_debugger.process.openocd.shutil.which", return_value="/usr/bin/openocd")
+    @patch("sbl_debugger.process.openocd.subprocess.Popen")
+    def test_read_registers_tcl_returns_none_on_failure(self, mock_popen_cls, mock_which):
+        """read_registers_tcl returns None when TCL command fails."""
+        mock_proc = _make_mock_popen()
+        mock_popen_cls.return_value = mock_proc
+
+        ocd = OpenOcdProcess("stlink.cfg", "stm32h7x.cfg")
+        ocd.start(timeout=2.0)
+
+        with patch.object(ocd, "tcl_command", side_effect=RuntimeError("Connection refused")):
+            regs = ocd.read_registers_tcl()
+
+        assert regs is None
+        ocd.stop()

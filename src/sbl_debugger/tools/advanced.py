@@ -6,7 +6,6 @@ import time
 
 from sbl_debugger.bridge.types import StopEvent
 from sbl_debugger.session.manager import SessionManager
-from sbl_debugger.tools.execution import _resync_gdb
 
 
 def register_tools(mcp, manager: SessionManager) -> None:
@@ -58,14 +57,37 @@ def register_tools(mcp, manager: SessionManager) -> None:
             if elf:
                 session.elf_path = elf
 
-            # Reset and halt after flash
+            # Reset and halt the target via OpenOCD
             session.bridge.monitor("reset halt")
             time.sleep(0.1)  # Let OpenOCD settle after reset
 
-            # Force GDB to re-query target state
-            resynced = _resync_gdb(session)
+            # Force GDB to rebuild its target state from scratch.
+            # After -target-download, GDB's internal state machine is
+            # corrupted — it doesn't know the target was reset. Disconnect
+            # and reconnect forces GDB to re-read PC, registers, and
+            # thread state cleanly. (See RPT-011 RC-1)
+            reconnected = False
+            try:
+                session.bridge.disconnect()
+                time.sleep(0.1)
+                result = session.bridge.connect(
+                    port=session.openocd.gdb_port,
+                )
+                if not result.is_error:
+                    reconnected = True
+                    # Re-load symbols after reconnect
+                    session.bridge.load_symbols(elf_path)
+            except Exception as e:
+                stats["reconnect_error"] = str(e)
+
+            # Drain any events from the reconnect
+            session.bridge.drain_events()
+
+            # Set halted state — after reconnect, GDB sees the target
+            # is stopped and will accept -exec-continue cleanly
             session.target_state.set_halted()
 
+            # Try to get frame info from the halted state
             events = session.bridge.drain_events()
             for e in events:
                 if e.get("message") == "stopped":
@@ -75,10 +97,11 @@ def register_tools(mcp, manager: SessionManager) -> None:
                         session.target_state.set_halted(stop)
 
             stats["state"] = "halted"
-            if not resynced:
+            stats["gdb_reconnected"] = reconnected
+            if not reconnected:
                 stats["warning"] = (
-                    "GDB may be desynchronized after flash. "
-                    "First continue may fail."
+                    "GDB reconnect failed after flash. "
+                    "State may be desynchronized."
                 )
 
             return stats

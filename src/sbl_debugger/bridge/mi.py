@@ -62,6 +62,17 @@ class MiBridge:
             self._connected = True
         return result
 
+    def disconnect(self) -> MiResult:
+        """Disconnect GDB from the remote target.
+
+        After disconnect, GDB forgets its target state. A subsequent
+        connect() forces GDB to re-read PC, registers, and memory
+        from scratch — effectively a state machine reset.
+        """
+        result = self.command("-target-disconnect", timeout=5.0)
+        self._connected = False
+        return result
+
     def load_symbols(self, elf_path: str) -> MiResult:
         """Load ELF symbols into GDB."""
         return self.command(

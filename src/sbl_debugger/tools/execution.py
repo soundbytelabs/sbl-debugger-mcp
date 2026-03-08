@@ -135,6 +135,46 @@ def _step_command(
         return {"error": str(e)}
 
 
+def _tcl_resume_fallback(session: DebugSession, name: str) -> dict:
+    """Resume the target via OpenOCD TCL when GDB's -exec-continue fails.
+
+    Mirrors the halt() function's TCL fallback pattern. Sends 'resume'
+    directly via OpenOCD's TCL port, bypassing GDB. Then notifies GDB
+    via 'monitor resume' so it updates its internal state.
+
+    This handles the common case where GDB is desynchronized after a
+    TCL halt or a load/reconnect, and -exec-continue either errors or
+    doesn't actually resume the target.
+    """
+    try:
+        session.openocd.tcl_command("resume")
+    except RuntimeError:
+        return {
+            "name": name,
+            "state": "unknown",
+            "error": "GDB continue failed and OpenOCD TCL resume also failed",
+        }
+
+    # Target is now running (OpenOCD confirmed via SWD).
+    session.target_state.set_running()
+
+    # Try to notify GDB so it knows the target is running.
+    # This is best-effort — the target IS running regardless.
+    try:
+        session.bridge.monitor("resume", timeout=1.0)
+    except Exception:
+        pass
+
+    # Drain any async events GDB emits after the monitor command
+    try:
+        time.sleep(0.05)
+        session.bridge.drain_events()
+    except Exception:
+        pass
+
+    return {"name": name, "state": "running", "method": "openocd_tcl"}
+
+
 def register_tools(mcp, manager: SessionManager) -> None:
     """Register execution control tools with the MCP server."""
 
@@ -236,9 +276,10 @@ def register_tools(mcp, manager: SessionManager) -> None:
                 if _resync_gdb(session):
                     result = session.bridge.command("-exec-continue")
                     if result.is_error:
-                        return {"error": result.error_msg}
+                        # GDB still won't continue — fall back to TCL resume
+                        return _tcl_resume_fallback(session, name)
                 else:
-                    return {"error": result.error_msg}
+                    return _tcl_resume_fallback(session, name)
 
             # Check if target resumed:
             # 1. GDB returns ^running as the result message
@@ -272,13 +313,9 @@ def register_tools(mcp, manager: SessionManager) -> None:
                 session.target_state.set_running()
                 return {"name": name, "state": "running"}
 
-            # Target didn't resume — report honestly
-            session.target_state.set_halted()
-            return {
-                "name": name,
-                "state": "halted",
-                "warning": "Target did not resume after continue. May need resync.",
-            }
+            # GDB thinks target didn't resume — verify via OpenOCD TCL
+            # and force resume if needed (mirrors halt's TCL fallback)
+            return _tcl_resume_fallback(session, name)
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}
 

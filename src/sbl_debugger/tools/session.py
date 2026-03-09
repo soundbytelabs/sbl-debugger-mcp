@@ -18,6 +18,7 @@ def register_tools(mcp, manager: SessionManager) -> None:
         name: str | None = None,
         interface: str | None = None,
         target_cfg: str | None = None,
+        mi_log: bool = False,
     ) -> dict:
         """Attach to a debug target. Launches OpenOCD and GDB, connects via SWD.
 
@@ -32,6 +33,7 @@ def register_tools(mcp, manager: SessionManager) -> None:
             name: Optional session name. Defaults to target name.
             interface: OpenOCD interface config (required if target="custom").
             target_cfg: OpenOCD target config (required if target="custom").
+            mi_log: Enable raw GDB/MI traffic logging to /tmp/sbl-debugger-mi-{name}.log.
         """
         try:
             if target == "custom":
@@ -52,6 +54,7 @@ def register_tools(mcp, manager: SessionManager) -> None:
                 target_name=target,
                 name=name,
                 elf_path=elf,
+                mi_log=mi_log,
             )
 
             # Halt the target after attach

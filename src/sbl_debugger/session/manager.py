@@ -24,6 +24,7 @@ class SessionManager:
         target_name: str,
         name: str | None = None,
         elf_path: str | None = None,
+        mi_log: bool = False,
     ) -> DebugSession:
         """Create a new debug session.
 
@@ -34,6 +35,7 @@ class SessionManager:
             target_name: Profile name (e.g., "daisy") or "custom".
             name: Optional session name. Defaults to target_name.
             elf_path: Optional ELF file path for symbol loading.
+            mi_log: Enable raw MI traffic logging to /tmp/sbl-debugger-mi-{name}.log.
 
         Returns:
             The new DebugSession.
@@ -66,7 +68,7 @@ class SessionManager:
             raise
 
         # Launch GDB and connect
-        bridge = MiBridge()
+        bridge = MiBridge(mi_log=mi_log, session_name=name)
         try:
             bridge.start()
 

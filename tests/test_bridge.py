@@ -1,7 +1,11 @@
-"""Tests for GDB/MI bridge types and response parsing."""
+"""Tests for GDB/MI bridge types, response parsing, and MI traffic logging."""
+
+import os
+import tempfile
 
 import pytest
 
+from sbl_debugger.bridge.mi import MiLogger
 from sbl_debugger.bridge.types import FrameInfo, StopEvent, MiResult
 
 
@@ -133,3 +137,85 @@ class TestMiResult:
     def test_error_msg_non_dict_payload(self):
         result = MiResult(message="error", payload="raw string")
         assert result.error_msg is None
+
+
+class TestMiLogger:
+    def test_creates_log_file_with_header(self, tmp_path):
+        path = str(tmp_path / "test.log")
+        logger = MiLogger(path)
+        logger.close()
+
+        content = open(path).read()
+        assert content.startswith("# MI traffic log")
+
+    def test_tx_logs_command(self, tmp_path):
+        path = str(tmp_path / "test.log")
+        logger = MiLogger(path)
+        logger.tx("-exec-continue")
+        logger.close()
+
+        content = open(path).read()
+        assert "TX -exec-continue" in content
+
+    def test_rx_logs_responses(self, tmp_path):
+        path = str(tmp_path / "test.log")
+        logger = MiLogger(path)
+        logger.rx([
+            {"type": "result", "message": "done", "payload": {"key": "val"}},
+            {"type": "notify", "message": "stopped", "payload": {"reason": "breakpoint-hit"}},
+        ])
+        logger.close()
+
+        content = open(path).read()
+        lines = content.strip().split("\n")
+        # Header + 2 RX lines
+        assert len(lines) == 3
+        assert "RX result|done|" in lines[1]
+        assert "RX notify|stopped|" in lines[2]
+
+    def test_tx_rx_timestamps_are_monotonic(self, tmp_path):
+        path = str(tmp_path / "test.log")
+        logger = MiLogger(path)
+        logger.tx("-exec-halt")
+        logger.rx([{"type": "result", "message": "done", "payload": None}])
+        logger.close()
+
+        lines = open(path).read().strip().split("\n")
+        # Extract timestamps from TX and RX lines (skip header)
+        tx_time = float(lines[1].split("]")[0].strip("["))
+        rx_time = float(lines[2].split("]")[0].strip("["))
+        assert rx_time >= tx_time
+
+    def test_empty_rx_no_output(self, tmp_path):
+        """rx() with empty list writes nothing."""
+        path = str(tmp_path / "test.log")
+        logger = MiLogger(path)
+        logger.rx([])
+        logger.close()
+
+        content = open(path).read()
+        lines = content.strip().split("\n")
+        assert len(lines) == 1  # Just the header
+
+    def test_close_is_idempotent(self, tmp_path):
+        path = str(tmp_path / "test.log")
+        logger = MiLogger(path)
+        logger.close()
+        logger.close()  # Should not raise
+
+    def test_mi_bridge_no_logger_by_default(self):
+        """MiBridge has no logger when mi_log=False (default)."""
+        from sbl_debugger.bridge.mi import MiBridge
+        bridge = MiBridge()
+        assert bridge._logger is None
+
+    def test_mi_bridge_creates_logger(self):
+        """MiBridge creates logger when mi_log=True."""
+        from sbl_debugger.bridge.mi import MiBridge
+        bridge = MiBridge(mi_log=True, session_name="test-session")
+        try:
+            assert bridge._logger is not None
+            assert os.path.exists("/tmp/sbl-debugger-mi-test-session.log")
+        finally:
+            bridge._logger.close()
+            os.unlink("/tmp/sbl-debugger-mi-test-session.log")

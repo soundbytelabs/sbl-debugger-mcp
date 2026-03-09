@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import threading
 import time
@@ -14,6 +15,41 @@ from sbl_debugger.bridge.types import MiResult, StopEvent
 _DEFAULT_GDB = "gdb-multiarch"
 
 
+class MiLogger:
+    """Raw MI traffic logger — writes timestamped TX/RX lines to a file.
+
+    Thread-safe: each write is a single file write of a pre-formatted string.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._file: io.TextIOWrapper = open(path, "w")
+        self._start = time.monotonic()
+        self._file.write(f"# MI traffic log — {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        self._file.flush()
+
+    def tx(self, cmd: str) -> None:
+        """Log a command sent to GDB."""
+        elapsed = time.monotonic() - self._start
+        self._file.write(f"[{elapsed:10.3f}] TX {cmd}\n")
+        self._file.flush()
+
+    def rx(self, responses: list[dict]) -> None:
+        """Log raw pygdbmi response dicts received from GDB."""
+        elapsed = time.monotonic() - self._start
+        for r in responses:
+            rtype = r.get("type", "?")
+            message = r.get("message", "")
+            payload = r.get("payload", "")
+            # Compact single-line format: type|message|payload
+            self._file.write(f"[{elapsed:10.3f}] RX {rtype}|{message}|{payload}\n")
+        self._file.flush()
+
+    def close(self) -> None:
+        """Close the log file."""
+        if self._file and not self._file.closed:
+            self._file.close()
+
+
 class MiBridge:
     """Thread-safe GDB/MI interface.
 
@@ -21,11 +57,19 @@ class MiBridge:
     typed result parsing, and helpers for common embedded debug operations.
     """
 
-    def __init__(self, gdb_command: str | None = None) -> None:
+    def __init__(
+        self,
+        gdb_command: str | None = None,
+        mi_log: bool = False,
+        session_name: str = "default",
+    ) -> None:
         self._gdb: GdbController | None = None
         self._lock = threading.Lock()
         self._gdb_command = gdb_command or _DEFAULT_GDB
         self._connected = False
+        self._logger: MiLogger | None = None
+        if mi_log:
+            self._logger = MiLogger(f"/tmp/sbl-debugger-mi-{session_name}.log")
 
     @property
     def is_connected(self) -> bool:
@@ -51,6 +95,9 @@ class MiBridge:
                 pass
             self._gdb = None
         self._connected = False
+        if self._logger is not None:
+            self._logger.close()
+            self._logger = None
 
     def connect(self, host: str = "localhost", port: int = 3333) -> MiResult:
         """Connect GDB to a remote target (OpenOCD GDB server)."""
@@ -89,7 +136,11 @@ class MiBridge:
             raise RuntimeError("GDB is not running")
 
         with self._lock:
+            if self._logger:
+                self._logger.tx(cmd)
             responses = self._gdb.write(cmd, timeout_sec=timeout)
+            if self._logger:
+                self._logger.rx(responses)
             return MiResult.from_responses(responses)
 
     def monitor(self, cmd: str, timeout: float = 10.0) -> MiResult:
@@ -117,6 +168,8 @@ class MiBridge:
                 )
             except Exception:
                 return []
+            if self._logger and responses:
+                self._logger.rx(responses)
             return [r for r in responses if r.get("type") == "notify"]
 
     def wait_for_stop(self, timeout: float = 30.0) -> StopEvent | None:

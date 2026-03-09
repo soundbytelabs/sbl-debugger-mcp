@@ -42,6 +42,8 @@ class DebugSession:
         }
         if self.elf_path:
             result["elf"] = self.elf_path
+        if getattr(self.bridge, "_logger", None) is not None:
+            result["mi_log"] = f"/tmp/sbl-debugger-mi-{self.name}.log"
         return result
 
     def shutdown(self) -> None:

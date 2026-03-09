@@ -6,6 +6,7 @@ import time
 
 from sbl_debugger.bridge.types import StopEvent
 from sbl_debugger.session.manager import SessionManager
+from sbl_debugger.tools.execution import _reconnect_gdb
 
 
 def register_tools(mcp, manager: SessionManager) -> None:
@@ -66,26 +67,7 @@ def register_tools(mcp, manager: SessionManager) -> None:
             # corrupted — it doesn't know the target was reset. Disconnect
             # and reconnect forces GDB to re-read PC, registers, and
             # thread state cleanly. (See RPT-011 RC-1)
-            reconnected = False
-            try:
-                session.bridge.disconnect()
-                time.sleep(0.1)
-                result = session.bridge.connect(
-                    port=session.openocd.gdb_port,
-                )
-                if not result.is_error:
-                    reconnected = True
-                    # Re-load symbols after reconnect
-                    session.bridge.load_symbols(elf_path)
-            except Exception as e:
-                stats["reconnect_error"] = str(e)
-
-            # Drain any events from the reconnect
-            session.bridge.drain_events()
-
-            # Set halted state — after reconnect, GDB sees the target
-            # is stopped and will accept -exec-continue cleanly
-            session.target_state.set_halted()
+            reconnected = _reconnect_gdb(session)
 
             # Try to get frame info from the halted state
             events = session.bridge.drain_events()

@@ -659,11 +659,15 @@ class TestContinueExecution:
         ), patch.object(
             MiBridge, "drain_events",
             return_value=[],  # No running event
+        ), patch.object(
+            OpenOcdProcess, "tcl_command",
+            side_effect=RuntimeError("not running"),
         ):
             result = tools["continue_execution"].fn(name="daisy")
 
-        assert result["state"] == "halted"
-        assert "warning" in result
+        # TCL fallback also fails — target is in unknown state
+        assert result["state"] == "unknown"
+        assert "error" in result
 
 
 # -- Wait for halt --

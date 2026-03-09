@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import struct
 
-from sbl_debugger.bridge.types import FrameInfo, MiResult
+from sbl_debugger.bridge.types import ConnectionLostError, FrameInfo, MiResult
 from sbl_debugger.session.manager import SessionManager
 
 # Core registers returned by debug_snapshot (not all 50+ GDB regs)
@@ -133,6 +133,19 @@ def register_tools(mcp, manager: SessionManager) -> None:
                 reg_values[reg_name] = entry["value"]
 
             return {"name": name, "registers": reg_values}
+        except ConnectionLostError:
+            # GDB connection dropped — reconnect and try TCL registers
+            from sbl_debugger.tools.execution import _reconnect_gdb
+            session = manager.get(name)
+            _reconnect_gdb(session)
+
+            # Try TCL register read as fallback
+            tcl_regs = session.openocd.read_registers_tcl()
+            if tcl_regs:
+                if registers:
+                    tcl_regs = {k: v for k, v in tcl_regs.items() if k in set(registers)}
+                return {"name": name, "registers": tcl_regs, "recovered": True}
+            return {"error": "Lost connection; reconnect + TCL fallback both failed"}
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}
 
@@ -157,6 +170,37 @@ def register_tools(mcp, manager: SessionManager) -> None:
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}
 
+    def _read_memory_gdb(session, address: str, length: int) -> dict | None:
+        """Read memory via GDB. Returns result dict or None on failure."""
+        result = session.bridge.command(
+            f"-data-read-memory-bytes {address} {length}"
+        )
+        if result.is_error:
+            return None
+
+        payload = result.payload
+        if not isinstance(payload, dict):
+            return None
+
+        memory = payload.get("memory", [])
+        if not memory:
+            return None
+
+        hex_data = "".join(region.get("contents", "") for region in memory)
+        return {"raw_bytes": _parse_hex_string(hex_data)}
+
+    def _read_memory_tcl(session, address: str, length: int) -> dict | None:
+        """Read memory via OpenOCD TCL. Fallback when GDB is unavailable."""
+        try:
+            addr_int = int(address, 0) if isinstance(address, str) else address
+        except ValueError:
+            return None  # Can't resolve symbol names via TCL
+
+        raw = session.openocd.read_memory_tcl(addr_int, length)
+        if raw is None:
+            return None
+        return {"raw_bytes": raw}
+
     @mcp.tool()
     def read_memory(
         name: str,
@@ -174,29 +218,39 @@ def register_tools(mcp, manager: SessionManager) -> None:
         """
         try:
             session = manager.get(name)
-            result = session.bridge.command(
-                f"-data-read-memory-bytes {address} {length}"
-            )
-            if result.is_error:
-                return {"error": result.error_msg}
 
-            payload = result.payload
-            if not isinstance(payload, dict):
-                return {"error": "Unexpected response from memory read"}
-
-            memory = payload.get("memory", [])
-            if not memory:
+            mem = _read_memory_gdb(session, address, length)
+            if mem is None:
                 return {"error": "No memory data returned"}
 
-            # Concatenate all memory regions
-            hex_data = "".join(region.get("contents", "") for region in memory)
-            raw_bytes = _parse_hex_string(hex_data)
-
+            raw_bytes = mem["raw_bytes"]
             return {
                 "name": name,
                 "address": address,
                 "length": len(raw_bytes),
                 "data": _format_memory(raw_bytes, format),
+            }
+        except ConnectionLostError:
+            # GDB connection dropped — try reconnect then TCL fallback
+            from sbl_debugger.tools.execution import _reconnect_gdb
+            session = manager.get(name)
+            _reconnect_gdb(session)
+
+            # Try GDB again after reconnect
+            mem = _read_memory_gdb(session, address, length)
+            if mem is None:
+                # Last resort: TCL memory read
+                mem = _read_memory_tcl(session, address, length)
+                if mem is None:
+                    return {"error": "Lost connection; reconnect + TCL fallback both failed"}
+
+            raw_bytes = mem["raw_bytes"]
+            return {
+                "name": name,
+                "address": address,
+                "length": len(raw_bytes),
+                "data": _format_memory(raw_bytes, format),
+                "recovered": True,
             }
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}
@@ -364,6 +418,12 @@ def register_tools(mcp, manager: SessionManager) -> None:
             # Clean up temporary variable object
             session.bridge.command(f"-var-delete {var_name}")
             return result_dict
+        except ConnectionLostError:
+            from sbl_debugger.tools.execution import _reconnect_gdb
+            session = manager.get(name)
+            if _reconnect_gdb(session):
+                return {"error": f"Connection lost evaluating '{expression}'. Session recovered — retry the expression."}
+            return {"error": "Lost connection to target. Detach and reattach."}
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}
 

@@ -158,6 +158,37 @@ class OpenOcdProcess:
         except (OSError, socket.timeout) as e:
             raise RuntimeError(f"TCL command '{cmd}' failed: {e}")
 
+    def read_memory_tcl(
+        self, address: int, length: int, timeout: float = 3.0
+    ) -> bytes | None:
+        """Read target memory via OpenOCD TCL port.
+
+        Uses 'read_memory' TCL command (available in OpenOCD 0.12+).
+        Falls back to 'mdw' for word-aligned reads.
+
+        Returns raw bytes or None on failure.
+        """
+        try:
+            # Read as 32-bit words (most efficient)
+            word_count = (length + 3) // 4
+            output = self.tcl_command(
+                f"read_memory 0x{address:08x} 32 {word_count}",
+                timeout=timeout,
+            )
+            if not output:
+                return None
+
+            # Output is space-separated hex values
+            raw = b""
+            for word_str in output.split():
+                word_str = word_str.strip()
+                if word_str:
+                    val = int(word_str, 0)
+                    raw += val.to_bytes(4, byteorder="little")
+            return raw[:length] if raw else None
+        except (RuntimeError, ValueError):
+            return None
+
     def read_registers_tcl(self, timeout: float = 3.0) -> dict[str, str] | None:
         """Read ARM core registers via OpenOCD TCL port.
 

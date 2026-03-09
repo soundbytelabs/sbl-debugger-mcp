@@ -6,7 +6,7 @@ import time
 
 from pygdbmi.constants import GdbTimeoutError
 
-from sbl_debugger.bridge.types import FrameInfo, MiResult, StopEvent
+from sbl_debugger.bridge.types import ConnectionLostError, FrameInfo, MiResult, StopEvent
 from sbl_debugger.session.manager import SessionManager
 from sbl_debugger.session.session import DebugSession
 from sbl_debugger.tools.inspection import read_source_context
@@ -83,6 +83,46 @@ def _query_current_frame(session: DebugSession) -> StopEvent | None:
     return None
 
 
+def _reconnect_gdb(session: DebugSession) -> bool:
+    """Reconnect GDB to a surviving OpenOCD after connection loss.
+
+    When OpenOCD loses and re-establishes its SWD connection (e.g., during
+    DMA/SAI peripheral reconfiguration), GDB's connection to OpenOCD drops.
+    OpenOCD stays alive — we can disconnect GDB and reconnect to force a
+    clean state rebuild.
+
+    This is the same pattern used in load() after flashing.
+    """
+    if not session.openocd.is_alive:
+        return False
+
+    try:
+        # Disconnect GDB from the dead connection
+        try:
+            session.bridge.disconnect()
+        except Exception:
+            pass  # Already disconnected
+
+        # Let OpenOCD re-establish SWD
+        time.sleep(0.2)
+
+        # Reconnect GDB to the surviving OpenOCD
+        result = session.bridge.connect(port=session.openocd.gdb_port)
+        if result.is_error:
+            return False
+
+        # Reload symbols so GDB has debug context
+        if session.elf_path:
+            session.bridge.load_symbols(session.elf_path)
+
+        # Drain stale events and update state
+        session.bridge.drain_events()
+        session.target_state.set_halted()
+        return True
+    except Exception:
+        return False
+
+
 def _step_command(
     manager: SessionManager, name: str, mi_cmd: str, count: int = 1
 ) -> dict:
@@ -131,6 +171,30 @@ def _step_command(
             result_dict["completed_steps"] = i + 1
         _add_source(result_dict, last_stop)
         return result_dict
+    except ConnectionLostError:
+        # SWD connection dropped during a step (e.g., stepping over
+        # DMA/SAI peripheral init). Reconnect and report where we landed.
+        if _reconnect_gdb(session):
+            stop = _query_current_frame(session)
+            if stop:
+                session.target_state.set_halted(stop)
+                result_dict = {
+                    "name": name,
+                    "state": "halted",
+                    "recovered": True,
+                    **stop.to_dict(),
+                }
+                if count > 1:
+                    result_dict["completed_steps"] = i
+                _add_source(result_dict, stop)
+                return result_dict
+            return {
+                "name": name,
+                "state": "halted",
+                "recovered": True,
+                "warning": "Reconnected after connection loss but could not read frame",
+            }
+        return {"error": "Lost connection to target during step. Detach and reattach."}
     except (ValueError, RuntimeError) as e:
         return {"error": str(e)}
 
@@ -316,6 +380,11 @@ def register_tools(mcp, manager: SessionManager) -> None:
             # GDB thinks target didn't resume — verify via OpenOCD TCL
             # and force resume if needed (mirrors halt's TCL fallback)
             return _tcl_resume_fallback(session, name)
+        except ConnectionLostError:
+            session = manager.get(name)
+            if _reconnect_gdb(session):
+                return _tcl_resume_fallback(session, name)
+            return {"error": "Lost connection to target. Detach and reattach."}
         except (ValueError, RuntimeError) as e:
             return {"error": str(e)}
 

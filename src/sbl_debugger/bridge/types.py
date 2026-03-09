@@ -5,6 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+class ConnectionLostError(RuntimeError):
+    """Raised when GDB's connection to OpenOCD is lost.
+
+    Typically caused by OpenOCD losing its SWD connection to the target
+    during peripheral reconfiguration (DMA, SAI, etc.). The MI log shows
+    "Remote connection closed" followed by thread-exited notifications.
+
+    Recovery: disconnect GDB, wait, reconnect to the surviving OpenOCD.
+    """
+
+    pass
+
+
 @dataclass(frozen=True)
 class FrameInfo:
     """A stack frame from GDB."""

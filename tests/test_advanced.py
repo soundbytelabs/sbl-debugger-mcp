@@ -72,6 +72,7 @@ class TestLoad:
             patch.object(MiBridge, "disconnect", return_value=MiResult(message="done")),
             patch.object(MiBridge, "connect", return_value=MiResult(message="connected")),
             patch.object(MiBridge, "drain_events", return_value=[]),
+            patch.object(OpenOcdProcess, "is_alive", new_callable=lambda: property(lambda self: True)),
         )
 
     def test_load_with_explicit_elf(self):
@@ -85,7 +86,7 @@ class TestLoad:
         }
 
         patches = self._load_patches(dl_payload)
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             result = tools["load"].fn(name="daisy", elf="/path/to/firmware.elf")
 
         assert result["status"] == "flashed"
@@ -99,7 +100,7 @@ class TestLoad:
         _mock_attach(mgr, elf_path="/session/firmware.elf")
 
         patches = self._load_patches()
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             result = tools["load"].fn(name="daisy")
 
         assert result["status"] == "flashed"
@@ -137,7 +138,7 @@ class TestLoad:
         session = _mock_attach(mgr, elf_path="/old/firmware.elf")
 
         patches = self._load_patches()
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             tools["load"].fn(name="daisy", elf="/new/firmware.elf")
 
         assert session.elf_path == "/new/firmware.elf"
@@ -159,7 +160,8 @@ class TestLoad:
              patch.object(MiBridge, "monitor", return_value=MiResult(message="done")), \
              patch.object(MiBridge, "disconnect", return_value=MiResult(message="done")) as mock_disc, \
              patch.object(MiBridge, "connect", return_value=MiResult(message="connected")) as mock_conn, \
-             patch.object(MiBridge, "drain_events", return_value=[]):
+             patch.object(MiBridge, "drain_events", return_value=[]), \
+             patch.object(OpenOcdProcess, "is_alive", new_callable=lambda: property(lambda self: True)):
             result = tools["load"].fn(name="daisy", elf="/path/firmware.elf")
 
         # Verify disconnect + reconnect happened
@@ -185,7 +187,8 @@ class TestLoad:
              patch.object(MiBridge, "monitor", return_value=MiResult(message="done")), \
              patch.object(MiBridge, "disconnect", return_value=MiResult(message="done")), \
              patch.object(MiBridge, "connect", return_value=MiResult(message="error", payload={"msg": "refused"})), \
-             patch.object(MiBridge, "drain_events", return_value=[]):
+             patch.object(MiBridge, "drain_events", return_value=[]), \
+             patch.object(OpenOcdProcess, "is_alive", new_callable=lambda: property(lambda self: True)):
             result = tools["load"].fn(name="daisy", elf="/path/firmware.elf")
 
         assert result["status"] == "flashed"

@@ -9,10 +9,30 @@ import time
 
 from pygdbmi.gdbcontroller import GdbController
 
-from sbl_debugger.bridge.types import MiResult, StopEvent
+from sbl_debugger.bridge.types import ConnectionLostError, MiResult, StopEvent
 
 # Default GDB binary
 _DEFAULT_GDB = "gdb-multiarch"
+
+# Markers that indicate OpenOCD dropped the SWD connection
+_CONNECTION_LOST_MARKERS = ("Remote connection closed", "Remote communication error")
+
+
+def _responses_indicate_connection_lost(responses: list[dict]) -> bool:
+    """Check if GDB responses contain signs of a lost OpenOCD connection."""
+    for r in responses:
+        # GDB emits log-type messages for connection drops
+        if r.get("type") == "log":
+            payload = r.get("payload", "")
+            if isinstance(payload, str):
+                for marker in _CONNECTION_LOST_MARKERS:
+                    if marker in payload:
+                        return True
+        # Also check notify events — thread-group-exited after connection loss
+        if r.get("type") == "notify" and r.get("message") == "thread-group-exited":
+            # Only a signal if we didn't request a disconnect
+            pass
+    return False
 
 
 class MiLogger:
@@ -68,7 +88,8 @@ class MiBridge:
         self._gdb_command = gdb_command or _DEFAULT_GDB
         self._connected = False
         self._logger: MiLogger | None = None
-        if mi_log:
+        import os
+        if mi_log or os.environ.get("SBL_MI_LOG"):
             self._logger = MiLogger(f"/tmp/sbl-debugger-mi-{session_name}.log")
 
     @property
@@ -131,6 +152,7 @@ class MiBridge:
         """Send an MI command and return the parsed result.
 
         Thread-safe — acquires the lock for the duration of the command.
+        Raises ConnectionLostError if GDB reports the remote connection dropped.
         """
         if self._gdb is None:
             raise RuntimeError("GDB is not running")
@@ -141,6 +163,13 @@ class MiBridge:
             responses = self._gdb.write(cmd, timeout_sec=timeout)
             if self._logger:
                 self._logger.rx(responses)
+            # Detect OpenOCD SWD connection loss — GDB emits a log message
+            # with "Remote connection closed" when OpenOCD drops the link.
+            if _responses_indicate_connection_lost(responses):
+                self._connected = False
+                raise ConnectionLostError(
+                    "GDB lost connection to OpenOCD (Remote connection closed)"
+                )
             return MiResult.from_responses(responses)
 
     def monitor(self, cmd: str, timeout: float = 10.0) -> MiResult:
@@ -156,6 +185,7 @@ class MiBridge:
         """Non-blocking read of pending async events from GDB.
 
         Returns raw pygdbmi response dicts with type=="notify".
+        Raises ConnectionLostError if the connection dropped.
         """
         if self._gdb is None:
             return []
@@ -170,6 +200,11 @@ class MiBridge:
                 return []
             if self._logger and responses:
                 self._logger.rx(responses)
+            if _responses_indicate_connection_lost(responses):
+                self._connected = False
+                raise ConnectionLostError(
+                    "GDB lost connection to OpenOCD (Remote connection closed)"
+                )
             return [r for r in responses if r.get("type") == "notify"]
 
     def wait_for_stop(self, timeout: float = 30.0) -> StopEvent | None:

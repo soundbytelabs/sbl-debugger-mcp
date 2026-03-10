@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from sbl_debugger.session.manager import SessionManager
 from sbl_debugger.tools import advanced as advanced_tools
 from sbl_debugger.tools import breakpoints as breakpoint_tools
+from sbl_debugger.tools import capture as capture_tools
 from sbl_debugger.tools import execution as execution_tools
 from sbl_debugger.tools import inspection as inspection_tools
 from sbl_debugger.tools import peripheral as peripheral_tools
@@ -29,3 +30,4 @@ breakpoint_tools.register_tools(mcp, _manager)
 snapshot_tools.register_tools(mcp, _manager)
 peripheral_tools.register_tools(mcp, _manager)
 advanced_tools.register_tools(mcp, _manager)
+capture_tools.register_tools(mcp, _manager)

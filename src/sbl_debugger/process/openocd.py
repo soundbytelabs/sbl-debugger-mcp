@@ -189,6 +189,32 @@ class OpenOcdProcess:
         except (RuntimeError, ValueError):
             return None
 
+    def write_memory_tcl(
+        self, address: int, data: bytes, timeout: float = 3.0
+    ) -> bool:
+        """Write to target memory via OpenOCD TCL port.
+
+        Works on a running target — no halt needed. Uses the Debug Access
+        Port (DAP) which has direct bus access independent of the CPU core.
+
+        Args:
+            address: Target memory address.
+            data: Raw bytes to write.
+            timeout: TCL command timeout.
+
+        Returns True on success, False on failure.
+        """
+        try:
+            # Write byte-by-byte using mwb (memory write byte)
+            for i, byte_val in enumerate(data):
+                self.tcl_command(
+                    f"mwb 0x{address + i:08x} 0x{byte_val:02x}",
+                    timeout=timeout,
+                )
+            return True
+        except RuntimeError:
+            return False
+
     def read_registers_tcl(self, timeout: float = 3.0) -> dict[str, str] | None:
         """Read ARM core registers via OpenOCD TCL port.
 
